@@ -1,0 +1,12 @@
+# Site metadata for browser automation — not secret, safe to commit.
+# Credentials (username/password) stay in secrets.yml (gitignored).
+#
+# Run scripts/discover_sites.py to auto-populate entries.
+#
+# Format:
+#   domain.com:
+#     login_url: https://domain.com/login
+#     username_selector: "input[name=email]"
+#     password_selector: "input[name=password]"
+#     submit_selector: "button[type=submit]"    # optional
+#     post_login_check: ".user-nav"             # optional: CSS selector present when logged in

@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:gofastmcp.com)",
+      "Bash(python -c \"import rich; print\\(rich.__version__\\)\" 2>/dev/null; python -c \"import fastmcp; print\\(fastmcp.__version__\\)\" 2>/dev/null; pip show rich fastmcp 2>/dev/null | grep -E \"^\\(Name|Version\\)\")",
+      "mcp__logfire__arbitrary_query",
+      "WebFetch(domain:ai.pydantic.dev)",
+      "WebFetch(domain:a2a-protocol.org)",
+      "WebFetch(domain:towardsdatascience.com)",
+      "WebFetch(domain:medium.com)",
+      "WebFetch(domain:github.com)",
+      "WebSearch",
+      "Bash(pip install:*)",
+      "Bash(python3.13 --version)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:api.github.com)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''mcp_servers/browser_server.py''\\).read\\(\\)\\); print\\(''OK''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''lib/browser/credentials.py''\\).read\\(\\)\\); print\\(''OK''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''lib/browser/session_store.py''\\).read\\(\\)\\); print\\(''OK''\\)\")",
+      "Bash(ls:*)",
+      "Bash(grep:*)",
+      "Bash(find:*)"
+    ]
+  }
+}
