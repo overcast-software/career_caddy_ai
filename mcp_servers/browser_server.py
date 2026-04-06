@@ -82,6 +82,21 @@ def _domain_from_url(url: str) -> str:
     return Credentials.normalize_domain(urlparse(url).hostname or "")
 
 
+def _resolve_tab_id(tab_id: str) -> str:
+    """Accept either a raw tab_id string or the full create_tab JSON response.
+
+    The LLM sometimes passes the entire JSON blob returned by create_tab
+    (e.g. '{"tab_id": "140487689885008"}') instead of just the ID string.
+    """
+    try:
+        parsed = json.loads(tab_id)
+        if isinstance(parsed, dict) and "tab_id" in parsed:
+            return str(parsed["tab_id"])
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return tab_id
+
+
 async def _inject_session(ctx: BrowserContext, domain: str) -> int:
     """Inject saved session cookies for a domain into the context. Returns count injected."""
     if not domain:
@@ -183,6 +198,7 @@ async def navigate(tab_id: str, url: str) -> str:
         tab_id: Tab ID from create_tab.
         url: Full URL including protocol.
     """
+    tab_id = _resolve_tab_id(tab_id)
     page = _tabs.get(tab_id)
     if page is None:
         return json.dumps({"error": f"Unknown tab_id: {tab_id}"})
@@ -217,6 +233,7 @@ async def navigate_and_snapshot(tab_id: str, url: str) -> str:
         tab_id: Tab ID from create_tab.
         url: Full URL including protocol.
     """
+    tab_id = _resolve_tab_id(tab_id)
     page = _tabs.get(tab_id)
     if page is None:
         return json.dumps({"error": f"Unknown tab_id: {tab_id}"})
@@ -251,6 +268,7 @@ async def snapshot(tab_id: str) -> str:
     Args:
         tab_id: Tab ID from create_tab.
     """
+    tab_id = _resolve_tab_id(tab_id)
     page = _tabs.get(tab_id)
     if page is None:
         return json.dumps({"error": f"Unknown tab_id: {tab_id}"})
@@ -273,6 +291,7 @@ async def get_links(tab_id: str) -> str:
     Args:
         tab_id: Tab ID from create_tab.
     """
+    tab_id = _resolve_tab_id(tab_id)
     page = _tabs.get(tab_id)
     if page is None:
         return json.dumps({"error": f"Unknown tab_id: {tab_id}"})
@@ -294,6 +313,7 @@ async def click(tab_id: str, selector: str) -> str:
         tab_id: Tab ID from create_tab.
         selector: CSS selector, e.g. 'button.see-more' or 'text=See more'.
     """
+    tab_id = _resolve_tab_id(tab_id)
     page = _tabs.get(tab_id)
     if page is None:
         return json.dumps({"error": f"Unknown tab_id: {tab_id}"})
@@ -315,6 +335,7 @@ async def fill_form(tab_id: str, fields: list[dict]) -> str:
             Example: [{"selector": "input[name=email]", "value": "user@example.com"},
                       {"selector": "input[name=password]", "value": "secret"}]
     """
+    tab_id = _resolve_tab_id(tab_id)
     page = _tabs.get(tab_id)
     if page is None:
         return json.dumps({"error": f"Unknown tab_id: {tab_id}"})
@@ -347,6 +368,7 @@ async def login_to_site(
         password_selector: CSS selector for the password field.
         submit_selector: Optional CSS selector for the submit button.
     """
+    tab_id = _resolve_tab_id(tab_id)
     page = _tabs.get(tab_id)
     if page is None:
         return json.dumps({"error": f"Unknown tab_id: {tab_id}"})
@@ -384,6 +406,7 @@ async def get_form_fields(tab_id: str) -> str:
     Args:
         tab_id: Tab ID from create_tab.
     """
+    tab_id = _resolve_tab_id(tab_id)
     page = _tabs.get(tab_id)
     if page is None:
         return json.dumps({"error": f"Unknown tab_id: {tab_id}"})
@@ -463,6 +486,7 @@ async def ensure_authenticated(tab_id: str, domain: str) -> str:
         tab_id: Tab ID from create_tab.
         domain: Domain to authenticate (e.g. 'linkedin.com').
     """
+    tab_id = _resolve_tab_id(tab_id)
     page = _tabs.get(tab_id)
     if page is None:
         return json.dumps({"error": f"Unknown tab_id: {tab_id}"})
@@ -554,6 +578,7 @@ async def close_tab(tab_id: str) -> str:
     Args:
         tab_id: Tab ID from create_tab.
     """
+    tab_id = _resolve_tab_id(tab_id)
     page = _tabs.pop(tab_id, None)
     if page is None:
         return json.dumps({"error": f"Unknown tab_id: {tab_id}"})
