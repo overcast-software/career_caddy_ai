@@ -8,10 +8,9 @@ from lib.models.job_models import JobPostData
 from agents.ollama_agent import global_model
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext
-from pydantic_ai.mcp import MCPServerStdio
 from pydantic_ai.usage import UsageLimits
 from lib.history import sanitize_orphaned_tool_calls, truncate_message_history
-from lib.utils import scrubbing_callback
+from lib.toolsets import CareerCaddyToolset, CareerCaddyDeps
 import asyncio
 
 
@@ -184,15 +183,12 @@ _CAREER_CADDY_SYSTEM_PROMPT = """
     """
 
 # Module-level agent for web UI / single-conversation use
-career_caddy_server = MCPServerStdio(
-    "python", args=["mcp_servers/career_caddy_server.py"], env=os.environ.copy()
-)
-
 career_caddy_agent = Agent(
     model=global_model,
     name="career_caddy_agent",
+    deps_type=CareerCaddyDeps,
     output_type=CareerCaddyResponse,
-    toolsets=[career_caddy_server],
+    toolsets=[CareerCaddyToolset(scope="career_caddy")],
     system_prompt=_CAREER_CADDY_SYSTEM_PROMPT,
     history_processors=[truncate_message_history, sanitize_orphaned_tool_calls],
 )
@@ -275,20 +271,17 @@ async def add_job_post(job_data: JobPostData) -> dict:
     """
 
     try:
-        # Fresh server + agent per call — no shared stdio subprocess or context
-        server = MCPServerStdio(
-            "python",
-            args=["mcp_servers/career_caddy_server.py"],
-            env=os.environ.copy(),
-        )
+        # In-process toolset — no subprocess spawning
         agent = Agent(
             "openai:gpt-4o-mini",
             name="career_caddy_agent",
+            deps_type=CareerCaddyDeps,
             output_type=CareerCaddyResponse,
-            toolsets=[server],
+            toolsets=[CareerCaddyToolset(scope="career_caddy")],
             system_prompt=_CAREER_CADDY_SYSTEM_PROMPT,
         )
-        result = await agent.run(prompt, usage_limits=UsageLimits(request_limit=20))
+        deps = CareerCaddyDeps(api_token=os.environ["CC_API_TOKEN"])
+        result = await agent.run(prompt, deps=deps, usage_limits=UsageLimits(request_limit=20))
         response: CareerCaddyResponse = result.output
         return {
             "success": response.action_taken != "error",
