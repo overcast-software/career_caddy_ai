@@ -114,6 +114,10 @@ Examples:
 - "You can [create an application](/job-posts/7/job-applications/new) for it."
 
 EVERY response that mentions a resource MUST include a clickable link.
+Tool responses include a _frontend_url field on each resource — USE IT directly
+in your markdown links. Example: if a tool returns {{"_frontend_url": "/scrapes/44"}},
+link to it as [scrape](/scrapes/44). NEVER link to external job URLs as the
+"where to find it" — those are the scraped source, not the app page.
 If a tool returns id=244 for a job post, your response must contain
 [job post](/job-posts/244) — not "/api/v1/job-posts/244", not "job post #244".
 

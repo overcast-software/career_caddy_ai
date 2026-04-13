@@ -58,6 +58,37 @@ _APPLICATION_SORT_FIELDS = Literal[
 # ---------------------------------------------------------------------------
 
 
+_TYPE_TO_ROUTE = {
+    "job-post": "job-posts",
+    "job-application": "job-applications",
+    "company": "companies",
+    "score": "scores",
+    "resume": "resumes",
+    "cover-letter": "cover-letters",
+    "question": "questions",
+    "answer": "answers",
+    "summary": "summaries",
+    "scrape": "scrapes",
+}
+
+
+def _inject_frontend_urls(data: dict) -> dict:
+    """Add _frontend_url to JSON:API resources so the LLM links to the app."""
+    def _tag(resource):
+        if isinstance(resource, dict) and "type" in resource and "id" in resource:
+            route = _TYPE_TO_ROUTE.get(resource["type"])
+            if route:
+                resource["_frontend_url"] = f"/{route}/{resource['id']}"
+        return resource
+
+    if isinstance(data.get("data"), list):
+        for item in data["data"]:
+            _tag(item)
+    elif isinstance(data.get("data"), dict):
+        _tag(data["data"])
+    return data
+
+
 class ApiClient:
     """HTTP client that forwards a token to the Career Caddy API."""
 
@@ -67,8 +98,10 @@ class ApiClient:
 
     def _ok(self, response: httpx.Response) -> str:
         if response.status_code in (200, 201, 202):
+            body = response.json()
+            _inject_frontend_urls(body)
             result = APIResponse(
-                success=True, data=response.json(), status_code=response.status_code
+                success=True, data=body, status_code=response.status_code
             )
         else:
             text = response.text[:500] if len(response.text) > 500 else response.text
@@ -559,7 +592,7 @@ async def get_scrapes(
     page: Optional[int] = None,
     per_page: Optional[int] = None,
 ) -> str:
-    """Fetch scrape records. Pass id for a single scrape; omit for a paginated list."""
+    """Fetch scrape records. Pass id for a single scrape; omit for a paginated list. Use sort='-id' for most recent first, per_page=1 for just the latest."""
     if id is not None:
         return await api.get(f"/api/v1/scrapes/{id}/")
     params = {}
