@@ -38,6 +38,7 @@ project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
 from pydantic_ai import Agent  # noqa: E402
+from pydantic_ai.messages import ModelRequest, ModelResponse, UserPromptPart, TextPart  # noqa: E402
 from lib.toolsets import CareerCaddyToolset, CareerCaddyDeps  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
@@ -174,9 +175,9 @@ async def chat(request: Request):
             role = msg.get("role", "user")
             content = msg.get("content", "")
             if role == "user":
-                messages.append({"role": "user", "content": content})
+                messages.append(ModelRequest(parts=[UserPromptPart(content=content)]))
             elif role == "assistant":
-                messages.append({"role": "assistant", "content": content})
+                messages.append(ModelResponse(parts=[TextPart(content=content)]))
 
         try:
             async with agent.run_stream(
