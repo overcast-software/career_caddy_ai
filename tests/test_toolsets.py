@@ -26,8 +26,8 @@ class TestScopes:
     def test_all_scope_matches_registry(self):
         assert SCOPES["all"] == set(TOOL_REGISTRY.keys())
 
-    def test_career_caddy_scope_has_14_tools(self):
-        assert len(SCOPES["career_caddy"]) == 14
+    def test_career_caddy_scope_has_15_tools(self):
+        assert len(SCOPES["career_caddy"]) == 15
 
     def test_every_scope_is_subset_of_all(self):
         for name, tools in SCOPES.items():
