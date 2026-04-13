@@ -40,6 +40,7 @@ async def report_usage(
     headers = {
         "Authorization": f"Bearer {api_token}",
         "Content-Type": "application/vnd.api+json",
+        "X-Forwarded-Proto": "https",
     }
     logger.info(
         "Reporting usage: agent=%s model=%s tokens=%s/%s/%s trigger=%s",
@@ -50,7 +51,7 @@ async def report_usage(
         trigger,
     )
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
             resp = await client.post(
                 urljoin(base, "/api/v1/ai-usages/"),
                 json=payload,

@@ -34,10 +34,11 @@ class APIContext(BaseModel):
     def __post_init__(self):
         """Initialize the HTTP client with API token authentication."""
         if not self.client:
-            self.client = httpx.AsyncClient()
-            self.client.headers.update(
-                {"Authorization": f"Bearer {self.credentials.api_token}"}
-            )
+            self.client = httpx.AsyncClient(follow_redirects=True)
+            self.client.headers.update({
+                "Authorization": f"Bearer {self.credentials.api_token}",
+                "X-Forwarded-Proto": "https",
+            })
 
 
 class JobPostCreate(BaseModel):

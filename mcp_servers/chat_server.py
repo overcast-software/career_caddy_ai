@@ -220,16 +220,24 @@ user by their first name. If asked "what's my name?" or similar identity
 questions, answer directly from this data. Never say you cannot access the
 user's profile — the data below IS their profile.
 
+If the user wants to UPDATE their profile (name, address, phone, etc.), you
+cannot do that directly. Instead, guide them to the settings page:
+"You can update that in [Settings > Profile](/settings)."
+<!-- navigate:/settings -->
+
 {user_profile}
 """
 
 
 async def _fetch_user_profile(api_key: str) -> str:
     """Fetch the authenticated user's profile from the API."""
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(follow_redirects=True) as client:
         resp = await client.get(
             f"{API_BASE_URL}/api/v1/me/",
-            headers={"Authorization": f"Bearer {api_key}"},
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "X-Forwarded-Proto": "https",
+            },
         )
         if resp.status_code != 200:
             logger.warning(
@@ -244,16 +252,25 @@ async def _fetch_user_profile(api_key: str) -> str:
         name = " ".join(
             filter(None, [attrs.get("first_name"), attrs.get("last_name")])
         )
+        username = attrs.get("username") or ""
         if not name:
-            name = attrs.get("username") or attrs.get("email") or ""
+            name = username or attrs.get("email") or ""
         if name:
             parts.append(f"Name: {name}")
+        if username:
+            parts.append(f"Username: {username}")
         if attrs.get("email"):
             parts.append(f"Email: {attrs['email']}")
+        if attrs.get("phone"):
+            parts.append(f"Phone: {attrs['phone']}")
+        if attrs.get("address"):
+            parts.append(f"Address: {attrs['address']}")
         if attrs.get("linkedin"):
             parts.append(f"LinkedIn: {attrs['linkedin']}")
         if attrs.get("github"):
             parts.append(f"GitHub: {attrs['github']}")
+        if attrs.get("links"):
+            parts.append(f"Links: {attrs['links']}")
         if parts:
             logger.info("Resolved user profile: %s", parts[0])
         return (

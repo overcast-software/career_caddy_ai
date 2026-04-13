@@ -94,7 +94,10 @@ class ApiClient:
 
     def __init__(self, base_url: str, token: str):
         self.base_url = base_url
-        self._headers = {"Authorization": f"Bearer {token}"}
+        self._headers = {
+            "Authorization": f"Bearer {token}",
+            "X-Forwarded-Proto": "https",
+        }
 
     def _ok(self, response: httpx.Response) -> str:
         if response.status_code in (200, 201, 202):
@@ -113,7 +116,7 @@ class ApiClient:
         return json.dumps(result.model_dump(), indent=2)
 
     async def get(self, path: str, params: dict | None = None) -> str:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
             resp = await client.get(
                 urljoin(self.base_url, path),
                 headers=self._headers,
@@ -122,7 +125,7 @@ class ApiClient:
             return self._ok(resp)
 
     async def post(self, path: str, payload: dict) -> str:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
             resp = await client.post(
                 urljoin(self.base_url, path),
                 headers=self._headers,
@@ -131,7 +134,7 @@ class ApiClient:
             return self._ok(resp)
 
     async def patch(self, path: str, payload: dict) -> str:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
             resp = await client.patch(
                 urljoin(self.base_url, path),
                 headers=self._headers,
