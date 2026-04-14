@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Poll the Career Caddy API for hold scrapes, scrape locally, push results back.
 
+The worker only runs the browser — extraction, job post creation, and scrape
+profile updates are handled by the API when it receives the scraped content.
+
 Usage:
-    BROWSER_HEADLESS=false \
     CC_API_BASE_URL=https://careercaddy.online \
     CC_API_TOKEN=<token> \
-    JOB_EXTRACTOR_MODEL=anthropic:claude-haiku-4-5-20251001 \
     uv run caddy-poller
 """
 
@@ -81,28 +82,9 @@ async def process_scrape(api: ApiClient, scrape: dict) -> bool:
                 old_path.rename(new_path)
                 logger.info("Screenshot: %s", new_path)
 
-        # Update scrape with content
+        # Push content back — the API handles extraction + profile update
         await update_scrape(api, scrape_id, status="completed", job_content=content)
-        logger.info("Scrape %s: content saved (%d chars)", scrape_id, len(content))
-
-        # Extract job data with LLM (Haiku) and create job post (gpt-4o-mini)
-        try:
-            from agents.agent_factory import register_defaults
-            from agents.job_extractor_agent import extract_job_from_content
-            from agents.career_caddy_agent import add_job_post
-
-            register_defaults()
-            api_token = os.environ.get("CC_API_TOKEN", "")
-
-            job_data = await extract_job_from_content(
-                content, url=url, api_token=api_token
-            )
-            logger.info("Extracted: %s at %s", job_data.title, job_data.company_name)
-
-            caddy_result = await add_job_post(job_data, api_token=api_token)
-            logger.info("Job post created: %s", json.dumps(caddy_result, indent=2))
-        except Exception:
-            logger.exception("Scrape %s: extraction/creation failed (content was saved)", scrape_id)
+        logger.info("Scrape %s: content delivered (%d chars), API will extract", scrape_id, len(content))
 
         return True
 
