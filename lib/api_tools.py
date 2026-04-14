@@ -73,12 +73,16 @@ _TYPE_TO_ROUTE = {
 
 
 def _inject_frontend_urls(data: dict) -> dict:
-    """Add _frontend_url to JSON:API resources so the LLM links to the app."""
+    """Add _frontend_url and strip API links so the LLM uses frontend paths."""
     def _tag(resource):
         if isinstance(resource, dict) and "type" in resource and "id" in resource:
             route = _TYPE_TO_ROUTE.get(resource["type"])
             if route:
                 resource["_frontend_url"] = f"/{route}/{resource['id']}"
+            # Remove API links/relationships to prevent the model from
+            # constructing URLs like https://api/v1/... instead of /companies/78
+            resource.pop("links", None)
+            resource.pop("relationships", None)
         return resource
 
     if isinstance(data.get("data"), list):

@@ -23,6 +23,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -205,6 +206,30 @@ Rules:
 - Only offer actions that make sense in context — do not add buttons to every response
 - The "label" should be short (2-5 words)
 
+## Page-Aware Data Access
+When the user asks about "this page", "what's here", "what do I have", or anything
+that refers to the content on their current page, use the Current Page context to
+pick the right tool. Map the URL path to a tool call:
+
+| URL pattern              | Tool call                          |
+|--------------------------|------------------------------------|
+| /resumes                 | get_resumes()                      |
+| /resumes/{{id}}          | get_resumes(id={{id}})              |
+| /job-posts               | get_job_posts()                    |
+| /job-posts/{{id}}        | get_job_posts(id={{id}})            |
+| /companies               | get_companies()                    |
+| /companies/{{id}}        | get_companies(id={{id}})            |
+| /job-applications        | get_job_applications()             |
+| /scores                  | get_scores()                       |
+| /scores/{{id}}           | get_scores(id={{id}})               |
+| /scrapes                 | get_scrapes()                      |
+| /scrapes/{{id}}          | get_scrapes(id={{id}})              |
+| /career-data             | get_career_data()                  |
+| /settings/ai-spend       | (no tool — explain the page)       |
+
+Extract the {{id}} from the URL path when present. For example, if the user is on
+/job-posts/42 and asks "tell me about this", call get_job_posts(id=42).
+
 ## Onboarding Help
 When the user sends a greeting or asks "what can you do?", check the Current Page
 context (if available). If they are on a resource list page (resumes, job-posts,
@@ -220,6 +245,11 @@ You MUST share any of these fields when the user asks. This includes their
 name, phone, address, email, LinkedIn, GitHub, and any other fields below.
 Never refuse to share this data — it belongs to the user and they entered it
 themselves in their account settings.
+
+IMPORTANT: When the user asks "who am I?", "what's my name?", or any identity
+question, answer ONLY from the profile fields below. Do NOT call get_career_data
+or any other tool — the answer is right here. Career data contains resumes and
+job history, NOT the user's name or contact info.
 
 Always address the user by their first name.
 
@@ -292,14 +322,28 @@ def _build_agent(user_profile: str, page_context: dict | None = None):
     if page_context:
         route = page_context.get("route", "unknown")
         url = page_context.get("url", "")
+        logger.info("Page context injected: route=%s url=%s", route, url)
+        # Extract resource ID from URL like /job-posts/42
+        id_match = re.search(r"/(\d+)(?:/|$)", url)
+        resource_id = id_match.group(1) if id_match else None
+
         prompt += (
             f"\n\n## Current Page\n"
-            f"The user is currently viewing: {route} ({url})\n"
-            f"Use this context to understand what they're looking at. If they say "
-            f'"this job post" or "these resumes", they mean the resource on their '
-            f"current page. If they ask about what's on screen, use the appropriate "
-            f"tool to fetch data for the resource ID in the URL."
+            f"Route: {route}\n"
+            f"URL: {url}\n"
         )
+        if resource_id:
+            prompt += f"Resource ID: {resource_id}\n"
+        prompt += (
+            f"When the user asks what page they are on, reply with the URL path "
+            f"above (e.g. \"{url}\"). Do NOT rephrase, guess, or invent a page name.\n"
+            f"Use the Page-Aware Data Access table to pick the right tool for this URL. "
+            f"If they say \"this\", \"what's here\", or refer to what's on screen, "
+            f"call the matching tool"
+        )
+        if resource_id:
+            prompt += f" with id={resource_id}"
+        prompt += " and summarize the results."
     return get_agent(
         "chat",
         system_prompt=prompt,
@@ -341,6 +385,7 @@ async def chat(request: Request):
     history = body.get("history", [])
     conversation_id = body.get("conversation_id", str(uuid.uuid4()))
     page_context = body.get("page_context")
+    logger.info("page_context received: %s", page_context)
 
     if not message:
         return JSONResponse({"error": "message is required"}, status_code=400)
@@ -351,6 +396,20 @@ async def chat(request: Request):
         user_profile = await _fetch_user_profile(token)
         agent = _build_agent(user_profile, page_context=page_context)
         deps = CareerCaddyDeps(api_token=token, base_url=API_BASE_URL)
+
+        # Prefix user message with context so the model sees it inline,
+        # not buried in the system prompt where gpt-4o-mini ignores it.
+        prefix_parts = []
+        # Extract user's name from profile for identity questions
+        for line in user_profile.split("\n"):
+            if line.startswith("Name: "):
+                prefix_parts.append(f"[User: {line[6:].strip()}]")
+                break
+        if page_context:
+            url = page_context.get("url", "")
+            if url:
+                prefix_parts.append(f"[Current page: {url}]")
+        augmented_message = f"{' '.join(prefix_parts)}\n{message}" if prefix_parts else message
 
         # Build message history for context
         messages = []
@@ -364,7 +423,7 @@ async def chat(request: Request):
 
         try:
             async with agent.run_stream(
-                message,
+                augmented_message,
                 deps=deps,
                 message_history=messages if messages else None,
             ) as result:
