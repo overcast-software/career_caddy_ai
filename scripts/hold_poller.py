@@ -31,7 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger("hold_poller")
 
 POLL_INTERVAL = int(os.environ.get("HOLD_POLL_INTERVAL", "30"))
-BACKOFF_SEQUENCE = [2, 4, 8, 16, 32]
+POLL_INTERVAL = int(os.environ.get("HOLD_POLL_INTERVAL", "30"))
 
 
 async def process_scrape(api: ApiClient, scrape: dict) -> bool:
@@ -146,23 +146,11 @@ async def main():
         os.environ.get("BROWSER_HEADLESS", "true"),
     )
 
-    backoff_idx = 0
-
     while running:
         count = await poll_once(api)
         if count:
             logger.info("Processed %d scrape(s)", count)
-            backoff_idx = 0
-        else:
-            backoff_idx += 1
-
-        if backoff_idx >= len(BACKOFF_SEQUENCE):
-            logger.info("Max backoff reached (%ds total), stopping.", sum(BACKOFF_SEQUENCE))
-            break
-
-        wait = BACKOFF_SEQUENCE[backoff_idx]
-        logger.debug("Next poll in %ds (step %d/%d)", wait, backoff_idx + 1, len(BACKOFF_SEQUENCE))
-        await asyncio.sleep(wait)
+        await asyncio.sleep(POLL_INTERVAL)
 
 
 def main_sync():
