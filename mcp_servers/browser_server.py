@@ -67,6 +67,8 @@ SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 LOGIN_WALL_SIGNALS = [
     "sign in", "log in", "login", "create an account",
     "forgot password", "enter your email", "join now",
+    "access denied", "not in our system", "contact support",
+    "continue to sign in",
 ]
 
 
