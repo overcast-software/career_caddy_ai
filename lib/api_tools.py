@@ -96,8 +96,9 @@ def _inject_frontend_urls(data: dict) -> dict:
 class ApiClient:
     """HTTP client that forwards a token to the Career Caddy API."""
 
-    def __init__(self, base_url: str, token: str):
+    def __init__(self, base_url: str, token: str, timeout: int = 120):
         self.base_url = base_url
+        self.timeout = timeout
         self._headers = {
             "Authorization": f"Bearer {token}",
             "X-Forwarded-Proto": "https",
@@ -120,7 +121,7 @@ class ApiClient:
         return json.dumps(result.model_dump(), indent=2)
 
     async def get(self, path: str, params: dict | None = None) -> str:
-        async with httpx.AsyncClient(follow_redirects=True) as client:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=self.timeout) as client:
             resp = await client.get(
                 urljoin(self.base_url, path),
                 headers=self._headers,
@@ -129,7 +130,7 @@ class ApiClient:
             return self._ok(resp)
 
     async def post(self, path: str, payload: dict) -> str:
-        async with httpx.AsyncClient(follow_redirects=True) as client:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=self.timeout) as client:
             resp = await client.post(
                 urljoin(self.base_url, path),
                 headers=self._headers,
@@ -138,7 +139,7 @@ class ApiClient:
             return self._ok(resp)
 
     async def patch(self, path: str, payload: dict) -> str:
-        async with httpx.AsyncClient(follow_redirects=True) as client:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=self.timeout) as client:
             resp = await client.patch(
                 urljoin(self.base_url, path),
                 headers=self._headers,
