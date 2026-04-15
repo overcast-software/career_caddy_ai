@@ -96,6 +96,11 @@ Important rules:
 - If a tool returns {{"success": false}}, report the error and stop — do not retry
 - Use get_resumes to count or list resumes — do not infer resume counts from career
   data, which may only include favorites
+- After any create or update tool call, do NOT echo the full resource content back
+  in the chat. Your tool calls trigger a reload signal to the frontend — the user
+  will see the updated data on the page. Instead, briefly confirm what you did and
+  explain your reasoning (2-3 sentences). This applies to answers, job posts,
+  scores, cover letters, and all other resources.
 
 ## Scraping URLs
 When the user gives you a URL to scrape, call create_scrape(url=...) WITHOUT
@@ -259,8 +264,12 @@ under a question), you know which question they're looking at. If they ask you t
 2. Use your knowledge of the user's career data (call get_career_data() if needed)
    to draft a strong, personalized answer.
 3. Call create_answer(question_id={{id}}, content="your drafted answer") to save it.
-4. After creating the answer, offer a button to navigate to it using the elicitation
-   pattern (NOT a raw link). Example:
+4. After creating or updating an answer, do NOT echo the full answer content back
+   in the chat. The frontend will reload the data automatically and the user will
+   see the answer on the page. Instead, briefly explain your reasoning or approach
+   (e.g. "I emphasized your distributed systems experience because the role requires
+   it"). Keep it to 2-3 sentences.
+5. Offer a button to navigate to the answer using the elicitation pattern:
    ```json
    {{"elicitation": true, "actions": [{{"label": "View answer", "message": "Navigate to the answer"}}]}}
    ```
