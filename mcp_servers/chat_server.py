@@ -480,6 +480,30 @@ async def chat(request: Request):
                     usage.request_tokens, usage.response_tokens,
                     usage.total_tokens, usage.requests,
                 )
+                # Emit reload events for resources mutated by tool calls
+                _TOOL_RELOAD_MAP = {
+                    "create_answer": "answer",
+                    "update_answer": "answer",
+                    "create_job_application": "job-application",
+                    "update_job_application": "job-application",
+                    "create_job_post_with_company_check": "job-post",
+                    "update_job_post": "job-post",
+                    "create_company": "company",
+                    "create_scrape": "scrape",
+                    "update_scrape": "scrape",
+                    "score_job_post": "score",
+                }
+                reloaded = set()
+                for msg in result.all_messages():
+                    for part in getattr(msg, "parts", []):
+                        tool_name = getattr(part, "tool_name", None)
+                        if tool_name and tool_name in _TOOL_RELOAD_MAP:
+                            resource = _TOOL_RELOAD_MAP[tool_name]
+                            if resource not in reloaded:
+                                reloaded.add(resource)
+                                reload_event = json.dumps({"type": "reload", "resource": resource})
+                                yield f"data: {reload_event}\n\n"
+
                 done_event = json.dumps({
                     "type": "done",
                     "content": full_text,

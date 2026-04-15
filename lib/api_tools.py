@@ -764,6 +764,28 @@ async def create_answer(
     return await api.post("/api/v1/answers/", payload)
 
 
+async def update_answer(
+    api: ApiClient,
+    answer_id: int,
+    content: Optional[str] = None,
+    favorite: Optional[bool] = None,
+) -> str:
+    """Update an existing answer's content or favorite status."""
+    attributes = {}
+    if content is not None:
+        attributes["content"] = content
+    if favorite is not None:
+        attributes["favorite"] = favorite
+    payload = {
+        "data": {
+            "type": "answer",
+            "id": str(answer_id),
+            "attributes": attributes,
+        }
+    }
+    return await api.patch(f"/api/v1/answers/{answer_id}/", payload)
+
+
 async def score_job_post(api: ApiClient, job_post_id: int) -> str:
     """Score a job post against the user's career data."""
     payload = {
