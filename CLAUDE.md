@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-Career Caddy AI is a job hunt assistant that orchestrates multiple AI agents to automate job discovery from emails, scrape job postings via browser automation, and manage applications through the Career Caddy backend API.
+Career Caddy AI provides browser automation, job extraction, and chat agents for the Career Caddy backend API. Email-based workflows (notmuch classification, email pipeline) have been moved to `career_caddy_automation`.
 
 ## Environment Setup
 
@@ -15,7 +15,6 @@ Dependencies are managed via `pyproject.toml` with `uv`. Environment variables c
 | `CC_API_TOKEN` | Yes | Career Caddy backend auth token |
 | `OPENAI_API_KEY` | Yes* | LLM provider (* or use ANTHROPIC_API_KEY) |
 | `ANTHROPIC_API_KEY` | No | Alternative LLM provider |
-| `NOTMUCH_MAILDIR` | Email workflows | Path to notmuch-indexed mail directory |
 | `FASTMCP_HOST` | No | MCP server bind host (default: `0.0.0.0`) |
 | `FASTMCP_PORT` | No | MCP server port (default: `3002`) |
 | `CAMOUFOX_DATA_DIR` | No | Where camoufox stores its browser binary |
@@ -36,9 +35,6 @@ source .envrc               # or: use direnv
 
 # 4. Set up browser credentials (needed for browser automation)
 cp secrets.yml.example secrets.yml   # fill in your job site credentials
-
-# 5. (Optional) Index emails for email-based workflows
-notmuch new
 ```
 
 **Creating `CC_API_TOKEN`**: After initializing the Career Caddy API (see `api/CLAUDE.md`), create a long-lived key:
@@ -58,17 +54,8 @@ curl -X POST http://localhost:8000/api/v1/api-keys/ \
 ## Running the Pipeline
 
 ```bash
-# Scrape a single job URL and add it to Career Caddy (no email setup needed)
-uv run caddy-pipeline --url https://example.com/job/posting
-
-# Full pipeline: scan job_post-tagged emails → scrape each URL → add to Career Caddy
-uv run caddy-pipeline
-
-# Classify recent emails as job posts (adds notmuch tags)
-uv run caddy-classify
-
-# Run the MCP gateway aggregator (for Claude Desktop / external MCP clients)
-uv run caddy-gateway
+# Scrape a single job URL and add it to Career Caddy
+uv run caddy-pipeline https://example.com/job/posting
 ```
 
 ## Architecture
@@ -86,17 +73,15 @@ Agents (in `agents/`) use the `pydantic-ai` framework. They access tools through
 | Server | Transport | Port | Purpose |
 |--------|-----------|------|---------|
 | `career_caddy_server.py` | stdio | — | CRUD on Career Caddy REST API (jobs, companies, applications) |
-| `email_server.py` | stdio | — | Email search/tagging via `notmuch` |
 | `browser_server.py` | stdio or SSE | 3004 | Browser automation via `camoufox` |
-| `gateway.py` | SSE | 3002 | Optional: aggregates all tools under namespaced prefixes (`email_*`, `caddy_*`, `browser_*`) |
+| `public_server.py` | SSE | 8000 | Public MCP endpoint at `mcp.careercaddy.online` |
+| `chat_server.py` | SSE | 8000 | Frontend chat via SSE streaming |
 
 ### Agent Responsibilities
 
-- **`email_classifier_agent.py`** — Tags emails with `job_post` / `evaluated` notmuch tags
 - **`career_caddy_agent.py`** — Validates and posts jobs to Career Caddy API; checks for duplicates before creating
 - **`job_extractor_agent.py`** — Extracts structured `JobPostData` from raw job posting text
-- **`job_email_to_caddy.py`** — **Main pipeline**: email → URL extraction → browser scrape → Career Caddy post
-- **`ollama_agent.py`** — Defines `global_model`; used by `career_caddy_agent.py` as the model provider
+- **`job_email_to_caddy.py`** — URL scraping pipeline: browser scrape → extract → Career Caddy post
 
 **Critical rules in `career_caddy_agent.py`** (enforced via system prompt):
 1. Always call `find_job_post_by_link(url)` before creating — never create duplicates
@@ -142,19 +127,14 @@ Resolution order: role-specific env var → `CADDY_DEFAULT_MODEL` → hardcoded 
 |---------|------------|-------------|
 | `CADDY_MODEL` | career_caddy_agent (CRUD) | gpt-4o-mini |
 | `CHAT_MODEL` | chat_server (user-facing) | claude-haiku-4-5 |
-| `EMAIL_CLASSIFIER_MODEL` | email_classifier | gpt-4o-mini |
 | `JOB_EXTRACTOR_MODEL` | job_extractor | claude-haiku-4-5 |
-| `PIPELINE_MODEL` | pipeline (email search) | gpt-4o-mini |
 | `BROWSER_SCRAPER_MODEL` | browser scraper | gpt-4o-mini |
 | `CADDY_DEFAULT_MODEL` | fallback for all roles | gpt-4o-mini |
 
-Example — use Haiku for job extraction:
-```bash
-JOB_EXTRACTOR_MODEL=anthropic:claude-haiku-4-5-20251001
-```
-
 The hold poller (`scripts/hold_poller.py`) skips the browser_scraper LLM entirely — it calls `scrape_page()` directly as a Python function, then hands content to the job extractor.
 
-## No Formal Test Framework
+## Tests
 
-Tests are inline `if __name__ == "__main__"` blocks. Run agent files directly.
+```bash
+uv run pytest tests/
+```

@@ -191,9 +191,7 @@ _DEFAULT_MODEL = "openai:gpt-4o-mini"
 # Set any of these to switch an individual agent's model:
 #   CADDY_MODEL            — career_caddy_agent (main agent + add_job_post)
 #   CHAT_MODEL             — chat_server (already read there, re-exported here)
-#   EMAIL_CLASSIFIER_MODEL — email_classifier_agent
 #   JOB_EXTRACTOR_MODEL    — job_extractor_agent
-#   PIPELINE_MODEL         — pipeline agents (email search)
 #   BROWSER_SCRAPER_MODEL  — browser scraper agent
 #   CADDY_DEFAULT_MODEL    — fallback for all agents not individually overridden
 # ---------------------------------------------------------------------------
@@ -206,9 +204,7 @@ def get_model(role: str | None = None) -> str:
     role_env_map = {
         "caddy": "CADDY_MODEL",
         "chat": "CHAT_MODEL",
-        "email_classifier": "EMAIL_CLASSIFIER_MODEL",
         "job_extractor": "JOB_EXTRACTOR_MODEL",
-        "pipeline": "PIPELINE_MODEL",
         "browser_scraper": "BROWSER_SCRAPER_MODEL",
     }
     if role and role in role_env_map:
@@ -376,21 +372,6 @@ def register_defaults() -> None:
         history_processors=_common_history,
     ))
 
-    # -- email_classifier --
-    from pydantic_ai.mcp import MCPServerStdio
-
-    register_agent("email_classifier", AgentConfig(
-        role="email_classifier",
-        system_prompt=(
-            "You are an email classifier. Read the email, determine if it "
-            "contains a job posting, and tag accordingly."
-        ),
-        toolset_factories=[
-            lambda: MCPServerStdio("python", args=["mcp_servers/email_server.py"]),
-        ],
-        history_processors=_common_history,
-    ))
-
     # -- job_extractor (no tools, structured output) --
     register_agent("job_extractor", AgentConfig(
         role="job_extractor",
@@ -401,21 +382,10 @@ def register_defaults() -> None:
         output_type=None,  # set by caller (JobPostData)
     ))
 
-    # -- pipeline (email job search) --
-    register_agent("pipeline", AgentConfig(
-        role="pipeline",
-        system_prompt=(
-            "Search for emails tagged 'job_post'. For each email found, read it "
-            "and extract the job title and one primary job posting URL."
-        ),
-        toolset_factories=[
-            lambda: MCPServerStdio(
-                "python", args=["mcp_servers/email_server.py"], env=os.environ.copy()
-            ),
-        ],
-    ))
-
     # -- browser_scraper --
+    from pydantic_ai.mcp import MCPServerStdio
+
+
     register_agent("browser_scraper", AgentConfig(
         role="browser_scraper",
         system_prompt=(

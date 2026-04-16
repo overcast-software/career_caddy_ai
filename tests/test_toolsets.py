@@ -175,11 +175,6 @@ class TestSecurityIsolation:
         browser_modules = [m for m in sys.modules if "lib.browser" in m]
         assert not browser_modules, f"Browser modules loaded: {browser_modules}"
 
-    def test_toolsets_does_not_import_email_server(self):
-        import sys
-        email_modules = [m for m in sys.modules if "email_server" in m]
-        assert not email_modules, f"Email server modules loaded: {email_modules}"
-
     def test_api_tools_has_no_browser_imports(self):
         """api_tools.py import lines must not reference browser, credentials, or secrets."""
         import lib.api_tools as mod

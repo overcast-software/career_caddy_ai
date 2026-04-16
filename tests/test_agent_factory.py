@@ -94,7 +94,7 @@ class TestGetModel:
             assert result == "openai:gpt-4o"
 
     def test_all_roles_have_env_mapping(self):
-        roles = ["caddy", "chat", "email_classifier", "job_extractor", "pipeline", "browser_scraper"]
+        roles = ["caddy", "chat", "job_extractor", "browser_scraper"]
         for role in roles:
             result = get_model(role)
             assert isinstance(result, str)
@@ -104,13 +104,10 @@ class TestGetModel:
         result = get_model("nonexistent_role")
         assert result == "openai:gpt-4o-mini"
 
-    def test_pipeline_and_browser_have_separate_env_vars(self):
-        with patch.dict(os.environ, {"PIPELINE_MODEL": "openai:gpt-4o"}, clear=True):
-            assert get_model("pipeline") == "openai:gpt-4o"
-            assert get_model("browser_scraper") == "openai:gpt-4o-mini"
+    def test_browser_has_separate_env_var(self):
         with patch.dict(os.environ, {"BROWSER_SCRAPER_MODEL": "openai:gpt-4o"}, clear=True):
-            assert get_model("pipeline") == "openai:gpt-4o-mini"
             assert get_model("browser_scraper") == "openai:gpt-4o"
+            assert get_model("caddy") == "openai:gpt-4o-mini"
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +255,7 @@ class TestRegisterDefaults:
     def test_registers_all_roles(self):
         # register_defaults is idempotent, call it
         register_defaults()
-        expected_roles = {"caddy", "chat", "email_classifier", "job_extractor", "pipeline", "browser_scraper"}
+        expected_roles = {"caddy", "chat", "job_extractor", "browser_scraper"}
         for role in expected_roles:
             assert get_agent_config(role) is not None, f"Missing registration for role: {role}"
 
@@ -266,11 +263,6 @@ class TestRegisterDefaults:
         register_defaults()
         config = get_agent_config("caddy")
         assert config.deps_type is not None
-
-    def test_email_classifier_has_toolset_factory(self):
-        register_defaults()
-        config = get_agent_config("email_classifier")
-        assert len(config.toolset_factories) > 0
 
     def test_job_extractor_has_no_toolsets(self):
         register_defaults()
