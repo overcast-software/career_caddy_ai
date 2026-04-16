@@ -810,7 +810,7 @@ async def scrape_page(url: str, profile: dict | None = None) -> str:
                     screenshot_name = f"{norm_domain or 'unknown'}_{ts}.png"
                     screenshot_path = SCREENSHOT_DIR / screenshot_name
                     try:
-                        await page.screenshot(path=str(screenshot_path), full_page=False)
+                        await page.screenshot(path=str(screenshot_path), full_page=True)
                         logfire.info(f"screenshot saved: {screenshot_path}")
                     except Exception as e:
                         logfire.warn(f"screenshot failed: {e}")
