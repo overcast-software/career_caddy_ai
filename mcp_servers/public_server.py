@@ -62,9 +62,17 @@ class ApiKeyTokenVerifier(TokenVerifier):
         async with httpx.AsyncClient() as client:
             resp = await client.get(
                 f"{self.api_base_url}/api/v1/me/",
-                headers={"Authorization": f"Bearer {token}"},
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "X-Forwarded-Proto": "https",
+                },
             )
             if resp.status_code != 200:
+                logger.warning(
+                    "Token verify upstream non-200: status=%s url=%s",
+                    resp.status_code,
+                    f"{self.api_base_url}/api/v1/me/",
+                )
                 return None
 
             user_data = resp.json().get("data", resp.json())
@@ -431,6 +439,29 @@ async def get_scores(
 # ---------------------------------------------------------------------------
 
 
+def _probe_upstream_api() -> None:
+    """Fail fast if the upstream API is unreachable or misrouted.
+
+    Catches the class of bug where the container starts but every token
+    verify silently returns a non-200 (e.g. SSL redirect, DisallowedHost,
+    wrong CC_API_BASE_URL). Crashlooping with a clear reason beats a
+    running container that 401s every request.
+    """
+    url = f"{API_BASE_URL}/api/v1/healthcheck/"
+    try:
+        resp = httpx.get(url, headers={"X-Forwarded-Proto": "https"}, timeout=5.0)
+    except httpx.HTTPError as exc:
+        logger.error("Upstream probe failed: %s (url=%s)", exc, url)
+        sys.exit(1)
+    if resp.status_code != 200:
+        logger.error(
+            "Upstream probe non-200: status=%s url=%s body=%s",
+            resp.status_code, url, resp.text[:200],
+        )
+        sys.exit(1)
+    logger.info("Upstream probe ok: %s", url)
+
+
 def main():
     host = os.environ.get("FASTMCP_HOST", "0.0.0.0")
     port = int(os.environ.get("FASTMCP_PORT", "8030"))
@@ -440,6 +471,7 @@ def main():
     logger.info("  Listening on: %s:%s", host, port)
     logger.info("  Auth: API key (jh_*) pass-through")
 
+    _probe_upstream_api()
     server.run(transport="streamable-http", host=host, port=port)
 
 

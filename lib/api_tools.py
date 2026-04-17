@@ -154,7 +154,10 @@ class ApiClient:
             with open(file_path, "rb") as f:
                 resp = await client.post(
                     urljoin(self.base_url, path),
-                    headers={"Authorization": self._headers["Authorization"]},
+                    headers={
+                        "Authorization": self._headers["Authorization"],
+                        "X-Forwarded-Proto": "https",
+                    },
                     files={field: (file_path.name, f, "image/png")},
                 )
             return self._ok(resp)
