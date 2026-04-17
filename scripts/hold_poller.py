@@ -243,9 +243,12 @@ async def main():
     )
 
     while running:
-        count = await poll_once(api)
-        if count:
-            logger.info("Processed %d scrape(s)", count)
+        try:
+            count = await poll_once(api)
+            if count:
+                logger.info("Processed %d scrape(s)", count)
+        except Exception:
+            logger.warning("Poll cycle failed, will retry", exc_info=True)
         await asyncio.sleep(POLL_INTERVAL)
 
 
