@@ -133,6 +133,30 @@ class ApiClient:
             )
             return self._ok(resp)
 
+    async def get_text(self, path: str, params: dict | None = None) -> str:
+        """GET an endpoint that returns a non-JSON body (e.g. text/markdown).
+
+        Returns the raw body on 2xx; on error returns a JSON error envelope
+        matching the APIResponse shape so callers can branch the same way.
+        """
+        async with httpx.AsyncClient(follow_redirects=True, timeout=self.timeout) as client:
+            resp = await client.get(
+                urljoin(self.base_url, path),
+                headers=self._headers,
+                params=params,
+            )
+        if resp.status_code in (200, 201, 202):
+            return resp.text
+        text = resp.text[:500] if len(resp.text) > 500 else resp.text
+        return json.dumps(
+            APIResponse(
+                success=False,
+                error=f"{resp.status_code} - {text}",
+                status_code=resp.status_code,
+            ).model_dump(),
+            indent=2,
+        )
+
     async def post(self, path: str, payload: dict) -> str:
         async with httpx.AsyncClient(follow_redirects=True, timeout=self.timeout) as client:
             resp = await client.post(
@@ -1041,3 +1065,201 @@ async def scrape_and_score(
         scores_url=scores_url,
         hold_fallback=hold_fallback,
     )
+
+
+# ---------------------------------------------------------------------------
+# Agent Wizard tools — resume + cover-letter show/edit, resume import,
+# and onboarding state writes.
+# ---------------------------------------------------------------------------
+
+
+async def show_resume(api: ApiClient, resume_id: int) -> str:
+    """Return a markdown-rendered view of a resume (token-efficient vs. JSON).
+
+    Use this after an import to narrate the extracted contents back to the user
+    for review. The response body is plain text/markdown.
+    """
+    return await api.get_text(f"/api/v1/resumes/{resume_id}/markdown/")
+
+
+async def edit_resume(
+    api: ApiClient,
+    resume_id: int,
+    title: Optional[str] = None,
+    name: Optional[str] = None,
+    notes: Optional[str] = None,
+    favorite: Optional[bool] = None,
+) -> str:
+    """Update a resume's top-level fields (title, name, notes, favorite)."""
+    attributes: dict = {}
+    if title is not None:
+        attributes["title"] = title
+    if name is not None:
+        attributes["name"] = name
+    if notes is not None:
+        attributes["notes"] = notes
+    if favorite is not None:
+        attributes["favorite"] = favorite
+    if not attributes:
+        return json.dumps(
+            APIResponse(
+                success=False,
+                error="edit_resume requires at least one field to update",
+            ).model_dump(),
+            indent=2,
+        )
+    payload = {
+        "data": {
+            "type": "resume",
+            "id": str(resume_id),
+            "attributes": attributes,
+        }
+    }
+    return await api.patch(f"/api/v1/resumes/{resume_id}/", payload)
+
+
+async def show_cover_letter(api: ApiClient, cover_letter_id: int) -> str:
+    """Return a markdown-rendered view of a cover letter."""
+    return await api.get_text(
+        f"/api/v1/cover-letters/{cover_letter_id}/markdown/"
+    )
+
+
+async def edit_cover_letter(
+    api: ApiClient,
+    cover_letter_id: int,
+    content: Optional[str] = None,
+    favorite: Optional[bool] = None,
+    status: Optional[str] = None,
+) -> str:
+    """Update a cover letter's content, favorite, or status."""
+    attributes: dict = {}
+    if content is not None:
+        attributes["content"] = content
+    if favorite is not None:
+        attributes["favorite"] = favorite
+    if status is not None:
+        attributes["status"] = status
+    if not attributes:
+        return json.dumps(
+            APIResponse(
+                success=False,
+                error="edit_cover_letter requires at least one field to update",
+            ).model_dump(),
+            indent=2,
+        )
+    payload = {
+        "data": {
+            "type": "cover-letter",
+            "id": str(cover_letter_id),
+            "attributes": attributes,
+        }
+    }
+    return await api.patch(
+        f"/api/v1/cover-letters/{cover_letter_id}/", payload
+    )
+
+
+async def import_resume_from_url(
+    api: ApiClient, url: str, resume_name: Optional[str] = None
+) -> str:
+    """Download a resume (DOCX) from a URL and hand it off to the ingest pipeline.
+
+    Returns immediately after the 202 — callers should poll with get_resumes(id=...)
+    until `status == "completed"`. For browser-driven uploads the user goes through
+    the normal UI; this tool is for programmatic handoffs and URL-based flows.
+    """
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=True, timeout=api.timeout
+        ) as client:
+            resp = await client.get(url)
+        if resp.status_code != 200:
+            return json.dumps(
+                APIResponse(
+                    success=False,
+                    error=f"Download failed: {resp.status_code}",
+                    status_code=resp.status_code,
+                ).model_dump(),
+                indent=2,
+            )
+        filename = resume_name or url.rsplit("/", 1)[-1] or "resume.docx"
+        async with httpx.AsyncClient(
+            follow_redirects=True, timeout=api.timeout
+        ) as client:
+            upload_resp = await client.post(
+                urljoin(api.base_url, "/api/v1/resumes/ingest/"),
+                headers={
+                    "Authorization": api._headers["Authorization"],
+                    "X-Forwarded-Proto": "https",
+                },
+                files={
+                    "file": (
+                        filename,
+                        resp.content,
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    )
+                },
+            )
+        return api._ok(upload_resp)
+    except Exception as e:
+        return json.dumps(
+            APIResponse(
+                success=False, error=f"import_resume_from_url: {e}"
+            ).model_dump(),
+            indent=2,
+        )
+
+
+async def reconcile_onboarding(api: ApiClient) -> str:
+    """Recompute the authenticated user's onboarding state from their real data.
+
+    Use this BEFORE reporting onboarding progress to the user. The stored
+    onboarding blob defaults to all-false when a user predates the feature,
+    so a naive read says "nothing is set up" even for long-time users.
+    Reconcile first, then answer questions like "how is my onboarding?" or
+    "what should I do next?" from the returned blob.
+
+    Preserves the subjective fields the data cannot answer for
+    (=wizard_enabled=, =resume_reviewed=) and overwrites the rest based on
+    actual resume / job post / score / cover letter / profile-basics state.
+    """
+    return await api.post("/api/v1/onboarding/reconcile/", {})
+
+
+async def edit_profile_onboarding(api: ApiClient, patch: dict) -> str:
+    """Merge a partial dict into the authenticated user's profile.onboarding blob.
+
+    Only keys in the canonical onboarding shape are accepted server-side; unknown
+    keys are ignored. Typical usage:
+        edit_profile_onboarding({"resume_reviewed": true})
+        edit_profile_onboarding({"wizard_enabled": false})
+    """
+    if not isinstance(patch, dict) or not patch:
+        return json.dumps(
+            APIResponse(
+                success=False,
+                error="edit_profile_onboarding requires a non-empty dict",
+            ).model_dump(),
+            indent=2,
+        )
+    me_raw = await api.get("/api/v1/me/")
+    me = json.loads(me_raw)
+    if not me.get("success"):
+        return me_raw
+    user_id = me.get("data", {}).get("data", {}).get("id")
+    if not user_id:
+        return json.dumps(
+            APIResponse(
+                success=False, error="Could not resolve authenticated user id"
+            ).model_dump(),
+            indent=2,
+        )
+    payload = {
+        "data": {
+            "type": "user",
+            "id": str(user_id),
+            "attributes": {"onboarding": patch},
+        }
+    }
+    return await api.patch(f"/api/v1/users/{user_id}/", payload)

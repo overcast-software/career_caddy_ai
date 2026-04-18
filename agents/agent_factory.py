@@ -345,7 +345,12 @@ def register_defaults() -> None:
     _defaults_registered = True
 
     from lib.history import sanitize_orphaned_tool_calls, truncate_message_history
-    from lib.toolsets import CareerCaddyToolset, CareerCaddyDeps
+    from lib.toolsets import (
+        CareerCaddyDeps,
+        CareerCaddyToolset,
+        onboarding_delegation_toolset,
+    )
+    from agents.onboarding_agent import register_onboarding_agent
 
     _common_history = [truncate_message_history, sanitize_orphaned_tool_calls]
 
@@ -364,13 +369,25 @@ def register_defaults() -> None:
     ))
 
     # -- chat (streaming web UI) --
+    # Chat gets the general CRUD surface PLUS a one-tool delegation toolset
+    # that hands onboarding-shaped turns off to a dedicated Agent Wizard
+    # sub-agent. Scope is `main_chat`, NOT `all`, so the onboarding-only
+    # tools (reconcile_onboarding, edit_profile_onboarding,
+    # import_resume_from_url) are NOT directly callable — forcing delegation
+    # for any onboarding work.
     register_agent("chat", AgentConfig(
         role="chat",
         system_prompt="",  # chat_server injects user-profile-aware prompt at runtime
         deps_type=CareerCaddyDeps,
-        toolset_factories=[lambda: CareerCaddyToolset(scope="all")],
+        toolset_factories=[
+            lambda: CareerCaddyToolset(scope="main_chat"),
+            lambda: onboarding_delegation_toolset(),
+        ],
         history_processors=_common_history,
     ))
+
+    # -- onboarding (Agent Wizard sub-agent; invoked via delegation tool) --
+    register_onboarding_agent()
 
     # -- job_extractor (no tools, structured output) --
     register_agent("job_extractor", AgentConfig(

@@ -31,6 +31,12 @@ class CareerCaddyDeps:
 
     api_token: str
     base_url: str = "http://localhost:8000"
+    # Per-turn context threaded through to delegation tools (e.g.
+    # ask_onboarding_wizard) so the sub-agent can build its own system
+    # prompt without re-fetching /me/ or re-reading the request body.
+    user_profile: str = ""
+    onboarding: dict | None = None
+    page_context: dict | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +78,14 @@ TOOL_REGISTRY: dict[str, Any] = {
     "get_scores": api_tools.get_scores,
     # Composite
     "scrape_and_score": api_tools.scrape_and_score,
+    # Agent Wizard
+    "show_resume": api_tools.show_resume,
+    "edit_resume": api_tools.edit_resume,
+    "show_cover_letter": api_tools.show_cover_letter,
+    "edit_cover_letter": api_tools.edit_cover_letter,
+    "import_resume_from_url": api_tools.import_resume_from_url,
+    "edit_profile_onboarding": api_tools.edit_profile_onboarding,
+    "reconcile_onboarding": api_tools.reconcile_onboarding,
 }
 
 
@@ -93,6 +107,12 @@ SCOPES: dict[str, set[str]] = {
         "get_answers",
         "create_answer",
         "update_answer",
+        # Agent Wizard
+        "show_resume", "edit_resume",
+        "show_cover_letter", "edit_cover_letter",
+        "import_resume_from_url",
+        "edit_profile_onboarding",
+        "reconcile_onboarding",
     },
     "job_discovery": {
         "find_company_by_name", "search_companies", "get_companies",
@@ -111,6 +131,29 @@ SCOPES: dict[str, set[str]] = {
     "scrape_management": {
         "create_scrape", "get_scrapes", "update_scrape",
     },
+    # Dedicated Agent Wizard scope — kept deliberately small so the sub-agent
+    # has a focused surface and negative rules aren't drowned out by general
+    # CRUD. Excludes cover-letter tools (not part of onboarding flow).
+    "onboarding": {
+        "reconcile_onboarding",
+        "edit_profile_onboarding",
+        "show_resume",
+        "edit_resume",
+        "import_resume_from_url",
+    },
+    # Main chat's toolset — EVERYTHING except the onboarding-only tools.
+    # Those tools reach the chat only via agent delegation
+    # (ask_onboarding_wizard → sub-agent). Giving the main agent direct
+    # access would let it answer onboarding questions without delegating,
+    # which defeats the sub-agent's focused-prompt advantage.
+    "main_chat": set(),  # populated below from TOOL_REGISTRY
+}
+
+# "main_chat" = all tools minus the onboarding-only surface.
+SCOPES["main_chat"] = set(TOOL_REGISTRY.keys()) - {
+    "reconcile_onboarding",
+    "edit_profile_onboarding",
+    "import_resume_from_url",
 }
 
 
@@ -211,3 +254,49 @@ def application_tracking_toolset(**kwargs) -> FunctionToolset[CareerCaddyDeps]:
 
 def scrape_management_toolset(**kwargs) -> FunctionToolset[CareerCaddyDeps]:
     return CareerCaddyToolset(scope="scrape_management", **kwargs)
+
+
+def onboarding_delegation_toolset(
+    *, id: str = "aw-delegation",
+) -> FunctionToolset[CareerCaddyDeps]:
+    """A one-tool toolset the main chat agent uses to delegate onboarding
+    turns to the dedicated Agent Wizard sub-agent (see
+    agents/onboarding_agent.py).
+
+    Kept in its own toolset (rather than crammed into TOOL_REGISTRY) because
+    `ask_onboarding_wizard` doesn't hit the API — it invokes a nested
+    pydantic-ai Agent. Mixing it into the HTTP-tool registry would muddy
+    the mental model.
+    """
+    # Deferred import to avoid circular imports at module load time.
+    from agents.onboarding_agent import run_onboarding_agent
+
+    async def ask_onboarding_wizard(
+        ctx: RunContext[CareerCaddyDeps], user_message: str
+    ) -> str:
+        """Delegate an onboarding-related user message to the Agent Wizard
+        sub-agent. Pass the user's message unchanged; the sub-agent's reply
+        is returned VERBATIM (do not paraphrase — it may contain navigate
+        markers like <!-- navigate:/settings/profile -->).
+
+        Use this when the user asks about their onboarding / setup /
+        progress / what to do, OR when you notice evidence that a checklist
+        step hasn't been done. Do NOT answer onboarding questions yourself.
+        """
+        deps = ctx.deps
+        onboarding = deps.onboarding or {}
+        return await run_onboarding_agent(
+            user_message=user_message,
+            user_profile=deps.user_profile,
+            onboarding=onboarding,
+            deps=deps,
+            page_context=deps.page_context,
+        )
+
+    toolset: FunctionToolset[CareerCaddyDeps] = FunctionToolset(id=id)
+    toolset.add_function(
+        ask_onboarding_wizard,
+        takes_ctx=True,
+        name="ask_onboarding_wizard",
+    )
+    return toolset

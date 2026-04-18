@@ -1,7 +1,7 @@
 """Tests for lib.toolsets — CareerCaddyToolset scoping, wrappers, and security."""
 
 import inspect
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic_ai import Agent, RunContext
@@ -24,8 +24,28 @@ class TestScopes:
     def test_all_scope_matches_registry(self):
         assert SCOPES["all"] == set(TOOL_REGISTRY.keys())
 
-    def test_career_caddy_scope_has_19_tools(self):
-        assert len(SCOPES["career_caddy"]) == 19
+    def test_career_caddy_scope_has_26_tools(self):
+        # 19 core CRUD + 7 Agent Wizard tools (show/edit resume + cover letter,
+        # import_resume_from_url, edit_profile_onboarding, reconcile_onboarding).
+        # AW intentionally does NOT get a tool for writing user account fields
+        # (first_name, email, etc.) — those edits go through the settings UI.
+        assert len(SCOPES["career_caddy"]) == 26
+
+    def test_career_caddy_scope_includes_agent_wizard_tools(self):
+        aw_tools = {
+            "show_resume", "edit_resume",
+            "show_cover_letter", "edit_cover_letter",
+            "import_resume_from_url",
+            "edit_profile_onboarding",
+            "reconcile_onboarding",
+        }
+        assert aw_tools <= SCOPES["career_caddy"]
+
+    def test_career_caddy_scope_excludes_user_account_writes(self):
+        """AW must not have a tool for writing first_name / email / etc.
+        Those writes go through /settings/profile, not through chat."""
+        assert "edit_user_profile" not in SCOPES["career_caddy"]
+        assert "edit_user_profile" not in TOOL_REGISTRY
 
     def test_every_scope_is_subset_of_all(self):
         for name, tools in SCOPES.items():
@@ -185,10 +205,19 @@ class TestSecurityIsolation:
             assert "browser" not in line.lower(), f"Bad import: {line}"
 
     def test_deps_has_no_credential_fields(self):
+        """Credentials live in api_token only. All other fields must be
+        plain contextual data (profile text, onboarding snapshot, page
+        info) — no secrets / passwords / keys."""
         fields = {f.name for f in CareerCaddyDeps.__dataclass_fields__.values()}
-        assert fields == {"api_token", "base_url"}
-        assert "secret" not in str(fields).lower()
-        assert "password" not in str(fields).lower()
+        # api_token is the only credential-bearing field.
+        assert "api_token" in fields
+        assert "base_url" in fields
+        # No field name should hint at a secondary credential surface.
+        lowered = str(fields).lower()
+        assert "secret" not in lowered
+        assert "password" not in lowered
+        assert "private_key" not in lowered
+        assert "access_key" not in lowered
 
 
 # ---------------------------------------------------------------------------
@@ -197,26 +226,6 @@ class TestSecurityIsolation:
 
 
 class TestWrapperExecution:
-    @pytest.mark.asyncio
-    async def test_wrapper_builds_api_client_from_deps(self):
-        """Wrapper should construct ApiClient with deps.base_url and deps.api_token."""
-        from lib import api_tools
-
-        with patch.object(api_tools, "get_career_data", new_callable=AsyncMock) as mock_fn:
-            mock_fn.return_value = '{"success": true}'
-
-            wrapper = _make_tool_wrapper(api_tools.get_career_data)
-
-            # Simulate RunContext
-            ctx = AsyncMock(spec=RunContext)
-            ctx.deps = CareerCaddyDeps(api_token="jh_test123", base_url="http://test:8000")
-
-            # The real wrapper calls api_tools.get_career_data(api, ...)
-            # but we patched the module-level function, so we need to
-            # call the wrapper which internally calls the original
-            # Let's test _make_tool_wrapper on a simple function instead
-            pass
-
     @pytest.mark.asyncio
     async def test_wrapper_passes_kwargs_through(self):
         """Wrapper should forward keyword args to the underlying function."""

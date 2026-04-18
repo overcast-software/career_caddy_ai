@@ -336,43 +336,117 @@ async def _fetch_user_profile(api_key: str) -> str:
             return "Could not load user profile."
         data = resp.json().get("data", resp.json())
         attrs = data.get("attributes", data)
-        parts = []
-        name = " ".join(
-            filter(None, [attrs.get("first_name"), attrs.get("last_name")])
-        )
-        username = attrs.get("username") or ""
-        if not name:
-            name = username or attrs.get("email") or ""
-        if name:
-            parts.append(f"Name: {name}")
-        if username:
-            parts.append(f"Username: {username}")
-        if attrs.get("email"):
-            parts.append(f"Email: {attrs['email']}")
-        if attrs.get("phone"):
-            parts.append(f"Phone: {attrs['phone']}")
-        if attrs.get("address"):
-            parts.append(f"Address: {attrs['address']}")
-        if attrs.get("linkedin"):
-            parts.append(f"LinkedIn: {attrs['linkedin']}")
-        if attrs.get("github"):
-            parts.append(f"GitHub: {attrs['github']}")
+        # Always emit every field. Empty fields become "(blank)" so the agent
+        # can see exactly what's missing rather than inferring from omitted
+        # lines. This is load-bearing for the AW rule about naming the
+        # specific missing profile fields.
+        def _field(label, value):
+            v = (value or "").strip() if isinstance(value, str) else (value or "")
+            return f"{label}: {v if v else '(blank)'}"
+
+        parts = [
+            _field("First name", attrs.get("first_name")),
+            _field("Last name", attrs.get("last_name")),
+            _field("Username", attrs.get("username")),
+            _field("Email", attrs.get("email")),
+            _field("Phone", attrs.get("phone")),
+            _field("Address", attrs.get("address")),
+            _field("LinkedIn", attrs.get("linkedin")),
+            _field("GitHub", attrs.get("github")),
+        ]
         if attrs.get("links"):
             parts.append(f"Links: {attrs['links']}")
-        if parts:
-            logger.info("Resolved user profile: %s", parts[0])
-        return (
-            "\n".join(parts)
-            if parts
-            else "User is authenticated but has not filled in their profile yet."
-        )
+        logger.info("Resolved user profile: %s", parts[0])
+        return "\n".join(parts)
 
 
 register_defaults()
 
 
-def _build_agent(user_profile: str, page_context: dict | None = None):
-    """Build a fresh agent with all career caddy tools."""
+AGENT_WIZARD_PROMPT_TEMPLATE = """
+
+## Agent Wizard — delegation rule (IMPORTANT)
+
+You have a tool named `ask_onboarding_wizard` that takes one string
+argument `user_message`. This tool runs a dedicated onboarding sub-agent
+that already has the user's setup state, profile, and page context
+loaded — it is ALWAYS the right place to answer onboarding questions.
+
+Triggers — if the user's message matches ANY of these, IMMEDIATELY call
+`ask_onboarding_wizard(user_message=<user's exact message>)`:
+- asks about onboarding, setup, progress, or "what should I do?"
+- greets while any setup step is still pending
+- wants to stop / turn off / disable the wizard
+- mentions importing, reviewing, or editing a resume as part of setup
+- gives any evidence that contradicts a claimed onboarding step
+
+Rules for this tool:
+- DO call it in the same turn as the user's message. Do NOT write text
+  like "I'll check your onboarding" before calling — just call it. The
+  response to the user IS the tool's output.
+- DO return the tool's output VERBATIM. Do NOT paraphrase, summarize,
+  prepend your own intro, or strip anything. The reply may contain
+  navigate markers (`<!-- navigate:/... -->`) the frontend uses for
+  routing; stripping them breaks the UX.
+- Do NOT answer onboarding questions yourself. Do NOT volunteer setup
+  guidance outside the tool. That is the sub-agent's job.
+"""
+
+
+
+_ONBOARDING_LABELS = {
+    "profile_basics": "Fill in name + email",
+    "resume_imported": "Import a resume",
+    "resume_reviewed": "Review extracted resume fields",
+    "first_job_post": "Add a job post to target",
+    "first_score": "Score your resume against a job",
+    "first_cover_letter": "Generate a cover letter",
+}
+
+
+def _render_onboarding(onboarding: dict) -> tuple[str, str]:
+    """Return (onboarding_lines, next_step_label) for prompt injection."""
+    wizard_enabled = bool(onboarding.get("wizard_enabled", True))
+    lines = [f"- wizard_enabled: {'yes' if wizard_enabled else 'no'}"]
+    next_step = "none — all setup complete"
+    for key, label in _ONBOARDING_LABELS.items():
+        done = bool(onboarding.get(key, False))
+        lines.append(f"- {key}: {'yes' if done else 'no'} ({label})")
+        if not done and next_step == "none — all setup complete":
+            next_step = label
+    if not wizard_enabled:
+        next_step = "wizard is disabled — do not volunteer onboarding advice"
+    return "\n".join(lines), next_step
+
+
+def _should_inject_aw(onboarding: dict | None) -> bool:
+    """Only attach the Agent Wizard prompt block when it can actually fire.
+
+    Skip when wizard is disabled (the block would just tell the agent to
+    stay quiet — no need to burn context) and when every step is done
+    (nothing to guide). This keeps the main chat prompt focused for the
+    common case and lets the AW rules dominate when they matter.
+    """
+    if not onboarding:
+        return False
+    if not bool(onboarding.get("wizard_enabled", True)):
+        return False
+    for key in _ONBOARDING_LABELS:
+        if not bool(onboarding.get(key, False)):
+            return True
+    return False
+
+
+def _build_system_prompt(
+    user_profile: str,
+    page_context: dict | None = None,
+    onboarding: dict | None = None,
+) -> str:
+    """Assemble the full system prompt for this turn.
+
+    Split from _build_agent so the prompt logic is testable without
+    requiring OpenAI credentials.
+    """
     prompt = SYSTEM_PROMPT.format(user_profile=user_profile)
     if page_context:
         route = page_context.get("route", "unknown")
@@ -399,6 +473,25 @@ def _build_agent(user_profile: str, page_context: dict | None = None):
         if resource_id:
             prompt += f" with id={resource_id}"
         prompt += " and summarize the results."
+    if _should_inject_aw(onboarding):
+        # The delegation rule has no template placeholders — the sub-agent
+        # receives the onboarding snapshot via CareerCaddyDeps, not via the
+        # parent's system prompt.
+        prompt += AGENT_WIZARD_PROMPT_TEMPLATE
+    return prompt
+
+
+def _build_agent(
+    user_profile: str,
+    page_context: dict | None = None,
+    onboarding: dict | None = None,
+):
+    """Build a fresh agent with all career caddy tools."""
+    prompt = _build_system_prompt(
+        user_profile,
+        page_context=page_context,
+        onboarding=onboarding,
+    )
     return get_agent(
         "chat",
         system_prompt=prompt,
@@ -440,7 +533,15 @@ async def chat(request: Request):
     history = body.get("history", [])
     conversation_id = body.get("conversation_id", str(uuid.uuid4()))
     page_context = body.get("page_context")
-    logger.info("page_context received: %s", page_context)
+    onboarding = body.get("onboarding")
+    if onboarding is not None and not isinstance(onboarding, dict):
+        logger.warning("Ignoring non-dict onboarding payload: %r", type(onboarding))
+        onboarding = None
+    logger.info(
+        "page_context received: %s, onboarding keys: %s",
+        page_context,
+        list(onboarding.keys()) if onboarding else None,
+    )
 
     if not message:
         return JSONResponse({"error": "message is required"}, status_code=400)
@@ -449,8 +550,18 @@ async def chat(request: Request):
 
     async def event_stream():
         user_profile = await _fetch_user_profile(token)
-        agent = _build_agent(user_profile, page_context=page_context)
-        deps = CareerCaddyDeps(api_token=token, base_url=API_BASE_URL)
+        agent = _build_agent(
+            user_profile,
+            page_context=page_context,
+            onboarding=onboarding,
+        )
+        deps = CareerCaddyDeps(
+            api_token=token,
+            base_url=API_BASE_URL,
+            user_profile=user_profile,
+            onboarding=onboarding or {},
+            page_context=page_context,
+        )
 
         # Prefix user message with context so the model sees it inline,
         # not buried in the system prompt where gpt-4o-mini ignores it.
