@@ -56,6 +56,35 @@ def get_headless() -> bool:
     return os.environ.get("BROWSER_HEADLESS", "true").lower() not in ("false", "0", "no")
 
 
+def _get_proxy_config() -> dict | None:
+    """Build a Playwright-compatible proxy dict from env vars.
+
+    Env:
+        BROWSER_PROXY_SERVER   — e.g. "socks5://localhost:1080" or "http://host:3128"
+        BROWSER_PROXY_USERNAME — optional
+        BROWSER_PROXY_PASSWORD — optional
+        BROWSER_PROXY_BYPASS   — optional, comma-separated host list
+
+    Caveat: Chromium (playwright) does NOT honor username/password for SOCKS
+    proxies — auth only works for HTTP/HTTPS proxies. Firefox (and Camoufox)
+    DO support SOCKS5 auth natively. Use --engine camoufox for authed SOCKS5.
+    """
+    server = os.environ.get("BROWSER_PROXY_SERVER")
+    if not server:
+        return None
+    cfg: dict = {"server": server}
+    user = os.environ.get("BROWSER_PROXY_USERNAME")
+    password = os.environ.get("BROWSER_PROXY_PASSWORD")
+    if user:
+        cfg["username"] = user
+    if password:
+        cfg["password"] = password
+    bypass = os.environ.get("BROWSER_PROXY_BYPASS")
+    if bypass:
+        cfg["bypass"] = bypass
+    return cfg
+
+
 # ---------------------------------------------------------------------------
 # Stealth wrapper for Chromium — auto-applies playwright-stealth per page
 # ---------------------------------------------------------------------------
@@ -125,8 +154,18 @@ async def _launch_camoufox(headless: bool):
     except ImportError:
         CamoufoxNotInstalled = Exception
 
-    logger.info("Starting Camoufox browser (headless=%s)", headless)
-    cm = AsyncCamoufox(headless=headless)
+    proxy = _get_proxy_config()
+    if proxy:
+        logger.info(
+            "Starting Camoufox browser (headless=%s) via proxy %s",
+            headless, proxy.get("server"),
+        )
+    else:
+        logger.info("Starting Camoufox browser (headless=%s)", headless)
+    camoufox_kwargs: dict = {"headless": headless}
+    if proxy:
+        camoufox_kwargs["proxy"] = proxy
+    cm = AsyncCamoufox(**camoufox_kwargs)
     try:
         browser = await cm.__aenter__()
     except CamoufoxNotInstalled:
@@ -144,10 +183,31 @@ async def _launch_chrome(headless: bool):
     """Launch Playwright Chromium with stealth wrapper."""
     from playwright.async_api import async_playwright
 
-    logger.info("Starting Playwright Chromium (headless=%s)", headless)
+    proxy = _get_proxy_config()
+    if proxy:
+        if proxy.get("server", "").startswith("socks") and (
+            proxy.get("username") or proxy.get("password")
+        ):
+            raise BrowserEngineError(
+                "Chromium does not support SOCKS proxy authentication. "
+                "Use --engine camoufox (Firefox — default engine, supports "
+                "SOCKS5 auth natively) or bridge the authed SOCKS5 through a "
+                "local HTTP proxy (e.g. gost -L=http://:8080 "
+                "-F=socks5://user:pass@localhost:1080) and set "
+                "BROWSER_PROXY_SERVER=http://localhost:8080."
+            )
+        logger.info(
+            "Starting Playwright Chromium (headless=%s) via proxy %s",
+            headless, proxy.get("server"),
+        )
+    else:
+        logger.info("Starting Playwright Chromium (headless=%s)", headless)
     pw = await async_playwright().start()
     try:
-        browser = await pw.chromium.launch(headless=headless)
+        launch_kwargs: dict = {"headless": headless}
+        if proxy:
+            launch_kwargs["proxy"] = proxy
+        browser = await pw.chromium.launch(**launch_kwargs)
         yield _StealthBrowser(browser)
     finally:
         await pw.stop()

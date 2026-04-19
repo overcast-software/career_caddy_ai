@@ -77,6 +77,7 @@ LOGIN_WALL_SIGNALS = [
     "forgot password", "enter your email", "join now",
     "access denied", "not in our system", "contact support",
     "continue to sign in",
+    "welcome back", "continue as", "not you?",
 ]
 
 # Single-signal phrases that unambiguously indicate a transient auth/bot-check
@@ -89,6 +90,7 @@ LOGIN_WALL_STRONG_SIGNALS = [
     "performing security verification", "verifies you are not a bot",
     "are not a bot", "security service to protect",
     "ray id:",
+    "sign in to discover",
 ]
 
 # Prefixes / phrases that indicate the page is still loading or bouncing
@@ -120,6 +122,89 @@ def _is_still_loading(content: str) -> bool:
     # Short pages containing an interstitial phrase anywhere — still bouncing.
     if len(stripped.split()) < 40 and any(p in stripped for p in LOADING_PREFIXES):
         return True
+    return False
+
+
+async def _try_expand_truncations(page) -> int:
+    """Click any 'See more' / 'Show more' / 'Read more' buttons that expand
+    truncated content (e.g. LinkedIn job descriptions). Returns click count.
+
+    Deliberately conservative: only clicks buttons whose own text contains
+    'more' — avoids clicking unrelated UI that happens to match a selector.
+    """
+    selectors = [
+        "button.jobs-description__footer-button",
+        "button.show-more-less-html__button",
+        "button[aria-label*='see more' i]",
+        "button[aria-label*='show more' i]",
+        "button:has-text('See more')",
+        "button:has-text('Show more')",
+        "button:has-text('Read more')",
+    ]
+    clicked = 0
+    seen: set[str] = set()
+    for sel in selectors:
+        try:
+            elements = await page.query_selector_all(sel)
+        except Exception:
+            continue
+        for el in elements:
+            try:
+                text = (await el.inner_text()).strip().lower()
+                if "more" not in text or text in seen:
+                    continue
+                seen.add(text)
+                await el.scroll_into_view_if_needed(timeout=2_000)
+                await el.click(timeout=3_000)
+                logfire.info(f"expanded truncation: {sel!r} ({text!r})")
+                clicked += 1
+                await asyncio.sleep(0.3)
+            except Exception:
+                pass
+    return clicked
+
+
+async def _try_rememberme_reauth(page, profile_selector: str | None = None) -> bool:
+    """Click a LinkedIn-style 'Continue as <name>' button if present.
+
+    Returns True if a click landed and navigation settled. The caller should
+    re-read page content afterward and re-check the login wall.
+
+    `profile_selector`, when provided, is tried first — it's the graduated
+    obstacle-click selector written back by the probation gate after the
+    obstacle agent resolved the same obstacle N times in a row.
+    """
+    candidates = [
+        *([profile_selector] if profile_selector else []),
+        "button[data-tracking-control-name*='rememberme']",
+        "a[data-tracking-control-name*='rememberme']",
+        "button.btn__primary--large",
+        "button:has-text('Continue as')",
+        "a:has-text('Continue as')",
+        "button:has-text('Continue')",
+    ]
+    for sel in candidates:
+        try:
+            el = await page.query_selector(sel)
+            if not el:
+                continue
+            text = (await el.inner_text()).strip().lower()
+            if "continue" not in text:
+                continue
+            logfire.info(f"rememberme: clicking {sel!r} ({text!r})")
+            await el.click(timeout=5_000)
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=15_000)
+            except Exception:
+                pass
+            try:
+                await page.wait_for_load_state("networkidle", timeout=10_000)
+            except Exception:
+                pass
+            await asyncio.sleep(2)
+            return True
+        except Exception as exc:
+            logfire.info(f"rememberme: {sel!r} click failed: {exc}")
     return False
 
 
@@ -783,21 +868,11 @@ async def screenshot(tab_id: str, full_page: bool = False) -> str:
     return json.dumps({"path": str(path), "domain": domain})
 
 
-@server.tool()
-async def scrape_page(url: str, profile: dict | None = None) -> str:
-    """Navigate to a URL and return all visible text in one call.
+def _resolve_scrape_inputs(url: str, profile: dict | None) -> tuple[str, str, list[dict], dict]:
+    """Parse domain, load cookies, and pull out css_selectors for a scrape.
 
-    Uses BROWSER_HEADLESS env var (default true). Automatically injects
-    saved session cookies for the URL's domain. Detects login walls and
-    returns an error instead of garbage content. Captures a screenshot
-    on every scrape (saved to SCREENSHOT_DIR).
-
-    If a scrape profile dict is provided (with css_selectors), uses known
-    selectors for page-state detection and discovers new job_data selectors.
-
-    Args:
-        url: Full URL including protocol.
-        profile: Optional scrape profile dict with css_selectors.
+    Shared by both the fresh-launch scrape_page and the attended-mode path.
+    Returns (raw_domain, norm_domain, cookies, css_selectors).
     """
     from urllib.parse import urlparse
     raw_domain = urlparse(url).hostname or ""
@@ -815,119 +890,208 @@ async def scrape_page(url: str, profile: dict | None = None) -> str:
                     logfire.info(f"loaded {len(cookies)} Firefox cookies for {raw_domain}")
             except Exception as e:
                 logfire.warn(f"could not load Firefox cookies for {raw_domain}: {e}")
-
     css_selectors = (profile or {}).get("css_selectors") or {}
+    return raw_domain, norm_domain, cookies, css_selectors
 
-    headless = _is_headless()
-    engine = get_engine()
+
+async def _scrape_on_page(page, url: str, norm_domain: str, css_selectors: dict) -> str:
+    """Run the full scrape flow on an already-navigable page.
+
+    Used by both the ephemeral scrape_page and the attended-mode resident path.
+    Does navigation, settling, truncation-expand, login-wall handling (incl.
+    obstacle agent), screenshot, and discovery.
+    """
+    screenshot_name = None
     try:
-        async with launch_browser(engine, headless) as browser:
+        with logfire.span("browser.scrape_page", url=url):
+            await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+            await asyncio.sleep(1)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=15_000)
+            except Exception:
+                pass
+
+            ready_selector = css_selectors.get("ready_selector")
+            if ready_selector:
+                try:
+                    await page.wait_for_selector(ready_selector, timeout=10_000)
+                    logfire.info(f"ready_selector matched: {ready_selector}")
+                except Exception:
+                    logfire.info(f"ready_selector timeout: {ready_selector}")
+            post_nav_wait_ms = css_selectors.get("post_nav_wait_ms")
+            if isinstance(post_nav_wait_ms, (int, float)) and post_nav_wait_ms > 0:
+                logfire.info(f"post_nav_wait_ms sleeping {post_nav_wait_ms}ms")
+                await asyncio.sleep(min(post_nav_wait_ms, 30_000) / 1000)
+            elif not ready_selector:
+                await asyncio.sleep(4)
+
+            try:
+                expanded = await _try_expand_truncations(page)
+                if expanded:
+                    await asyncio.sleep(0.5)
+            except Exception as exc:
+                logfire.info(f"expand truncations failed: {exc}")
+
+            content = ""
+            for _ in range(5):
+                content = await page.inner_text("body")
+                if not _is_still_loading(content):
+                    break
+                logfire.info("page still loading/redirecting, waiting...")
+                await asyncio.sleep(2)
+            logfire.info("finished loading")
+
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            screenshot_name = f"{norm_domain or 'unknown'}_{ts}.png"
+            screenshot_path = SCREENSHOT_DIR / screenshot_name
+            try:
+                await page.screenshot(path=str(screenshot_path), full_page=True)
+                logfire.info(f"screenshot saved: {screenshot_path}")
+            except Exception as e:
+                logfire.warn(f"screenshot failed: {e}")
+                screenshot_name = None
+
+            selector_results = None
+            if css_selectors:
+                selector_results = await _check_profile_selectors(page, css_selectors)
+                logfire.info(f"selector check: {selector_results}")
+                if selector_results["blocked"]:
+                    return json.dumps({
+                        "title": await page.title(),
+                        "url": page.url,
+                        "content": "",
+                        "error": "blocked_page_detected",
+                        "message": "Page matched a known blocked-page selector.",
+                        "screenshot": screenshot_name,
+                        "selector_results": selector_results,
+                    })
+
+            is_authenticated = selector_results["authenticated"] if selector_results else False
+            if not is_authenticated and _detect_login_wall(content):
+                graduated = css_selectors.get("obstacle_click_selector")
+                if "continue as" in content.lower() or graduated:
+                    if await _try_rememberme_reauth(page, profile_selector=graduated):
+                        content = await page.inner_text("body")
+                        if not _detect_login_wall(content):
+                            logfire.info("login wall cleared via rememberme click")
+                for attempt in range(3):
+                    if not _detect_login_wall(content):
+                        break
+                    logfire.info(
+                        f"login wall signals detected, waiting for late content (attempt {attempt + 1}/3)"
+                    )
+                    await asyncio.sleep(3)
+                    content = await page.inner_text("body")
+                    if not _detect_login_wall(content):
+                        logfire.info("login wall cleared after wait")
+                        break
+
+            obstacle_click_winning = None
+            if not is_authenticated and _detect_login_wall(content):
+                hints = css_selectors.get("interaction_hints")
+                if hints:
+                    try:
+                        from agents.obstacle_agent import run_obstacle_agent
+                        logfire.info("obstacle agent invoked")
+                        outcome = await run_obstacle_agent(page, hints, content)
+                        logfire.info(f"obstacle agent outcome: {outcome}")
+                        if outcome.get("actions"):
+                            content = await page.inner_text("body")
+                            if not _detect_login_wall(content):
+                                obstacle_click_winning = outcome["actions"][-1]
+                                logfire.info(
+                                    f"obstacle agent cleared wall; winning click: {obstacle_click_winning}"
+                                )
+                    except Exception as exc:
+                        logfire.warn(f"obstacle agent failed: {exc}")
+
+            if not is_authenticated and _detect_login_wall(content):
+                word_count = len(content.strip().split())
+                result = {
+                    "title": await page.title(),
+                    "url": page.url,
+                    "content": "",
+                    "error": "login_wall_detected",
+                    "message": (
+                        f"Page appears to be a login wall ({word_count} words, "
+                        "login signals found). Use ensure_authenticated or "
+                        "manual_login.py to seed session cookies for this domain."
+                    ),
+                    "screenshot": screenshot_name,
+                }
+                if selector_results:
+                    result["selector_results"] = selector_results
+                return json.dumps(result)
+
+            discovered_selectors = {}
+            if not css_selectors.get("job_data"):
+                discovered_selectors = await _discover_job_selectors(page)
+                if discovered_selectors:
+                    logfire.info(f"discovered job selectors: {discovered_selectors}")
+
+            candidate_ready_selector = None
+            if not ready_selector:
+                for sel in _JOB_SELECTOR_CANDIDATES["title"]:
+                    if not any(c in sel for c in (".", "#", "[", ":")):
+                        continue
+                    try:
+                        el = await page.query_selector(sel)
+                        if el and (await el.inner_text()).strip():
+                            candidate_ready_selector = sel
+                            break
+                    except Exception:
+                        pass
+
+            result = {
+                "title": await page.title(),
+                "url": page.url,
+                "content": content,
+                "screenshot": screenshot_name,
+            }
+            if selector_results:
+                result["selector_results"] = selector_results
+            if discovered_selectors:
+                result["discovered_selectors"] = discovered_selectors
+            if candidate_ready_selector:
+                result["candidate_ready_selector"] = candidate_ready_selector
+            if obstacle_click_winning:
+                result["obstacle_click_winning"] = obstacle_click_winning
+
+        return json.dumps(result)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+@server.tool()
+async def scrape_page(url: str, profile: dict | None = None) -> str:
+    """Ephemeral scrape: launch browser, make context, scrape, teardown.
+
+    Kept for the MCP tool interface. Attended mode uses scrape_page_attended
+    with a ResidentBrowser for persistent captcha-warm sessions.
+    """
+    _, norm_domain, cookies, css_selectors = _resolve_scrape_inputs(url, profile)
+    try:
+        async with launch_browser(get_engine(), _is_headless()) as browser:
             ctx = await browser.new_context()
             if cookies:
                 await ctx.add_cookies(cookies)
             page = await ctx.new_page()
-            try:
-                with logfire.span("browser.scrape_page", url=url):
-                    logfire.info(f"loading page (engine={engine}, headless={headless})")
-                    await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-                    await asyncio.sleep(1)
-                    try:
-                        await page.wait_for_load_state("networkidle", timeout=15_000)
-                    except Exception:
-                        pass
-                    content = ""
-                    for _ in range(5):
-                        content = await page.inner_text("body")
-                        if not _is_still_loading(content):
-                            break
-                        logfire.info("page still loading/redirecting, waiting...")
-                        await asyncio.sleep(2)
-                    logfire.info("finished loading")
-
-                    # Capture screenshot
-                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    screenshot_name = f"{norm_domain or 'unknown'}_{ts}.png"
-                    screenshot_path = SCREENSHOT_DIR / screenshot_name
-                    try:
-                        await page.screenshot(path=str(screenshot_path), full_page=True)
-                        logfire.info(f"screenshot saved: {screenshot_path}")
-                    except Exception as e:
-                        logfire.warn(f"screenshot failed: {e}")
-                        screenshot_name = None
-
-                    # Profile-aware page-state detection
-                    selector_results = None
-                    if css_selectors:
-                        selector_results = await _check_profile_selectors(page, css_selectors)
-                        logfire.info(f"selector check: {selector_results}")
-
-                        if selector_results["blocked"]:
-                            return json.dumps({
-                                "title": await page.title(),
-                                "url": page.url,
-                                "content": "",
-                                "error": "blocked_page_detected",
-                                "message": "Page matched a known blocked-page selector.",
-                                "screenshot": screenshot_name,
-                                "selector_results": selector_results,
-                            })
-
-                    # Detect login walls — skip if profile confirms authenticated.
-                    # Some sites render the login-wall markup first and swap in real
-                    # content a beat later, so give the page a few more seconds and
-                    # re-read before giving up.
-                    is_authenticated = selector_results["authenticated"] if selector_results else False
-                    if not is_authenticated and _detect_login_wall(content):
-                        for attempt in range(3):
-                            logfire.info(
-                                f"login wall signals detected, waiting for late content (attempt {attempt + 1}/3)"
-                            )
-                            await asyncio.sleep(3)
-                            content = await page.inner_text("body")
-                            if not _detect_login_wall(content):
-                                logfire.info("login wall cleared after wait")
-                                break
-                    if not is_authenticated and _detect_login_wall(content):
-                        word_count = len(content.strip().split())
-                        result = {
-                            "title": await page.title(),
-                            "url": page.url,
-                            "content": "",
-                            "error": "login_wall_detected",
-                            "message": (
-                                f"Page appears to be a login wall ({word_count} words, "
-                                "login signals found). Use ensure_authenticated or "
-                                "manual_login.py to seed session cookies for this domain."
-                            ),
-                            "screenshot": screenshot_name,
-                        }
-                        if selector_results:
-                            result["selector_results"] = selector_results
-                        return json.dumps(result)
-
-                    # Discover job selectors if profile has none
-                    discovered_selectors = {}
-                    if not css_selectors.get("job_data"):
-                        discovered_selectors = await _discover_job_selectors(page)
-                        if discovered_selectors:
-                            logfire.info(f"discovered job selectors: {discovered_selectors}")
-
-                    result = {
-                        "title": await page.title(),
-                        "url": page.url,
-                        "content": content,
-                        "screenshot": screenshot_name,
-                    }
-                    if selector_results:
-                        result["selector_results"] = selector_results
-                    if discovered_selectors:
-                        result["discovered_selectors"] = discovered_selectors
-
-                return json.dumps(result)
-            except Exception as e:
-                return json.dumps({"error": str(e)})
+            return await _scrape_on_page(page, url, norm_domain, css_selectors)
     except BrowserEngineError as exc:
         return json.dumps({"error": str(exc)})
+
+
+async def scrape_page_attended(resident, url: str, profile: dict | None = None) -> str:
+    """Attended scrape: reuse a ResidentBrowser's per-domain tab.
+
+    Acquires the domain lock to serialize concurrent scrapes for the same
+    host. Live captcha/login state persists across scrapes for the lifetime
+    of the resident browser.
+    """
+    _, norm_domain, cookies, css_selectors = _resolve_scrape_inputs(url, profile)
+    async with resident.lock_for(norm_domain):
+        page = await resident.page_for(norm_domain, seed_cookies=cookies)
+        return await _scrape_on_page(page, url, norm_domain, css_selectors)
 
 
 if __name__ == "__main__":

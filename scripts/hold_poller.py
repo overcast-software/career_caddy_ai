@@ -26,8 +26,17 @@ from lib.api_tools import (
     ApiClient, get_scrapes, get_scrape_profile, update_scrape,
     update_scrape_profile, upload_screenshot,
 )
-from lib.browser.engine import configure as configure_engine
-from mcp_servers.browser_server import scrape_page
+from lib.browser.engine import (
+    configure as configure_engine,
+    get_engine,
+    launch_browser,
+)
+from lib.browser.resident import ResidentBrowser
+from lib.url_unwrap import unwrap_url
+from mcp_servers.browser_server import scrape_page, scrape_page_attended
+
+# Module-level resident browser; set by the attended main() before the poll loop.
+_RESIDENT: ResidentBrowser | None = None
 
 logging.basicConfig(
     level=logging.INFO,
@@ -74,6 +83,11 @@ async def process_scrape(api: ApiClient, scrape: dict) -> bool:
         await update_scrape(api, scrape_id, status="failed", note="No URL provided")
         return False
 
+    unwrapped = unwrap_url(url)
+    if unwrapped != url:
+        logger.info("Scrape %s: unwrapped tracker URL\n  from: %s\n  to:   %s", scrape_id, url, unwrapped)
+        url = unwrapped
+
     logger.info("Processing scrape %s: %s", scrape_id, url)
 
     # Fetch scrape profile for this domain
@@ -89,7 +103,10 @@ async def process_scrape(api: ApiClient, scrape: dict) -> bool:
 
     try:
         # Direct scrape — no LLM, just browser (profile-aware)
-        result_json = await scrape_page(url, profile=profile)
+        if _RESIDENT is not None:
+            result_json = await scrape_page_attended(_RESIDENT, url, profile=profile)
+        else:
+            result_json = await scrape_page(url, profile=profile)
         result = json.loads(result_json)
 
         if result.get("error") == "blocked_page_detected":
@@ -141,10 +158,56 @@ async def process_scrape(api: ApiClient, scrape: dict) -> bool:
         return False
 
 
+READY_SELECTOR_PROBATION_THRESHOLD = 2
+OBSTACLE_CLICK_PROBATION_THRESHOLD = 2
+
+
+def _apply_probation_gate(
+    existing: dict, updated: dict, candidate: str | None,
+    candidate_key: str, graduated_key: str, threshold: int,
+    profile_id: int, label: str,
+) -> bool:
+    """Run a generic probation gate: candidate must match N consecutive times
+    before it's promoted from `candidate_key` to `graduated_key`.
+
+    Mutates `updated` in place; returns True if anything changed.
+    """
+    if not candidate or existing.get(graduated_key):
+        return False
+    prev = existing.get(candidate_key) or {}
+    prev_sel = prev.get("selector") if isinstance(prev, dict) else None
+    prev_count = prev.get("matches", 0) if isinstance(prev, dict) else 0
+
+    if prev_sel == candidate:
+        matches = prev_count + 1
+        if matches >= threshold:
+            updated[graduated_key] = candidate
+            updated.pop(candidate_key, None)
+            logger.info(
+                "Profile %s: promoting %s after %d matches: %s",
+                profile_id, label, matches, candidate,
+            )
+        else:
+            updated[candidate_key] = {"selector": candidate, "matches": matches}
+            logger.info(
+                "Profile %s: %s candidate %s at %d/%d matches",
+                profile_id, label, candidate, matches, threshold,
+            )
+    else:
+        updated[candidate_key] = {"selector": candidate, "matches": 1}
+        logger.info(
+            "Profile %s: new %s candidate %s (was %s)",
+            profile_id, label, candidate, prev_sel,
+        )
+    return True
+
+
 async def _update_profile_from_results(api: ApiClient, profile: dict | None, result: dict):
     """Update the scrape profile with selector findings from the browser."""
     selector_results = result.get("selector_results")
     discovered = result.get("discovered_selectors")
+    candidate_ready = result.get("candidate_ready_selector")
+    obstacle_click_winning = result.get("obstacle_click_winning")
 
     if not profile:
         return
@@ -159,6 +222,29 @@ async def _update_profile_from_results(api: ApiClient, profile: dict | None, res
         updated["job_data"] = discovered
         changed = True
         logger.info("Profile %s: writing discovered job_data selectors: %s", profile_id, list(discovered.keys()))
+
+    # Probation gate for ready_selector (selector used to signal SPA page
+    # content is fully rendered).
+    if _apply_probation_gate(
+        existing, updated, candidate_ready,
+        candidate_key="_ready_selector_candidate",
+        graduated_key="ready_selector",
+        threshold=READY_SELECTOR_PROBATION_THRESHOLD,
+        profile_id=profile_id, label="ready_selector",
+    ):
+        changed = True
+
+    # Probation gate for obstacle_click_selector (selector the obstacle agent
+    # learned clears a site-specific login/account-chooser interstitial). Once
+    # promoted, _try_rememberme_reauth tries it first and skips the LLM.
+    if _apply_probation_gate(
+        existing, updated, obstacle_click_winning,
+        candidate_key="_obstacle_click_candidate",
+        graduated_key="obstacle_click_selector",
+        threshold=OBSTACLE_CLICK_PROBATION_THRESHOLD,
+        profile_id=profile_id, label="obstacle_click_selector",
+    ):
+        changed = True
 
     # Log warnings if existing selectors failed
     if selector_results and existing.get("job_data") and not selector_results.get("job_data_matched"):
@@ -207,12 +293,42 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--headless", action="store_true", default=None, help="Run headless")
     parser.add_argument("--headed", dest="headless", action="store_false", help="Run headed")
+    parser.add_argument(
+        "--attended", action="store_true",
+        help="Launch a single headed browser with per-domain tabs. Solve captchas "
+             "once in the open tabs; state persists across scrapes. Implies --headed.",
+    )
     return parser.parse_args()
 
 
+def _attended_preseed_domains() -> list[str]:
+    """Domains to pre-open tabs for — read from secrets.yml."""
+    try:
+        from lib.browser.credentials import Credentials
+        creds = Credentials.load()
+        return sorted(creds.domains.keys())
+    except Exception as exc:
+        logger.warning("Could not load secrets.yml for preseed: %s", exc)
+        return []
+
+
+async def _run_poll_loop(api: ApiClient, running_flag):
+    while running_flag():
+        try:
+            count = await poll_once(api)
+            if count:
+                logger.info("Processed %d scrape(s)", count)
+        except Exception:
+            logger.warning("Poll cycle failed, will retry", exc_info=True)
+        await asyncio.sleep(POLL_INTERVAL)
+
+
 async def main():
+    global _RESIDENT
     args = _parse_args()
-    configure_engine(engine=args.engine, headless=args.headless)
+    # Attended mode forces headed.
+    headless = False if args.attended else args.headless
+    configure_engine(engine=args.engine, headless=headless)
 
     base_url = os.environ.get("CC_API_BASE_URL")
     token = os.environ.get("CC_API_TOKEN")
@@ -233,23 +349,30 @@ async def main():
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
 
-    from lib.browser.engine import get_engine, get_headless
+    from lib.browser.engine import get_headless
+    mode = "attended" if args.attended else "ephemeral"
     logger.info(
-        "Hold poller started (interval=%ds, api=%s, engine=%s, headless=%s)",
-        POLL_INTERVAL,
-        base_url,
-        get_engine(),
-        get_headless(),
+        "Hold poller started (mode=%s, interval=%ds, api=%s, engine=%s, headless=%s)",
+        mode, POLL_INTERVAL, base_url, get_engine(), get_headless(),
     )
 
-    while running:
-        try:
-            count = await poll_once(api)
-            if count:
-                logger.info("Processed %d scrape(s)", count)
-        except Exception:
-            logger.warning("Poll cycle failed, will retry", exc_info=True)
-        await asyncio.sleep(POLL_INTERVAL)
+    if args.attended:
+        async with launch_browser(get_engine(), headless=False) as browser:
+            _RESIDENT = ResidentBrowser(browser)
+            preseed = _attended_preseed_domains()
+            logger.info("Attended: preseeding tabs for %s", preseed)
+            await _RESIDENT.preseed(preseed)
+            logger.info(
+                "Attended: tabs open. Solve any captchas/logins in the browser; "
+                "scrapes will start on the next poll tick."
+            )
+            try:
+                await _run_poll_loop(api, lambda: running)
+            finally:
+                await _RESIDENT.close()
+                _RESIDENT = None
+    else:
+        await _run_poll_loop(api, lambda: running)
 
 
 def main_sync():

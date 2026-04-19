@@ -20,6 +20,11 @@ Dependencies are managed via `pyproject.toml` with `uv`. Environment variables c
 | `CAMOUFOX_DATA_DIR` | No | Where camoufox stores its browser binary |
 | `BROWSER_ENGINE` | No | `camoufox` (default) or `chrome` (Playwright Chromium + stealth) |
 | `BROWSER_HEADLESS` | No | `true` (default) or `false` — also settable via `--headless`/`--headed` CLI flags |
+| `BROWSER_PROXY_SERVER` | No | e.g. `socks5://localhost:1080` or `http://host:3128`. Applied to both engines. |
+| `BROWSER_PROXY_USERNAME` | No | Proxy auth. **Chromium ignores auth on SOCKS proxies** — use camoufox for authed SOCKS5. |
+| `BROWSER_PROXY_PASSWORD` | No | Proxy auth. See caveat above. |
+| `BROWSER_PROXY_BYPASS` | No | Comma-separated host list to exclude from the proxy. |
+| `OBSTACLE_AGENT_MODEL` | No | LLM for the obstacle agent that resolves login walls / account choosers. Falls back to `BROWSER_SCRAPER_MODEL`. |
 | `LOGFIRE_TOKEN` | No | Observability / tracing |
 | `OLLAMA_API_BASE` | No | Local Ollama endpoint (default: `http://127.0.0.1:11434`) |
 
