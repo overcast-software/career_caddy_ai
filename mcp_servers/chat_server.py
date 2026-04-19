@@ -39,15 +39,11 @@ from starlette.routing import Route
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
-from pydantic_ai import (  # noqa: E402
-    Agent,
-    FunctionToolCallEvent,
-    FunctionToolResultEvent,
-    PartDeltaEvent,
-    PartStartEvent,
-    TextPartDelta,
-)
 from pydantic_ai.messages import ModelRequest, ModelResponse, UserPromptPart, TextPart  # noqa: E402
+from pydantic_ai.ag_ui import run_ag_ui  # noqa: E402
+from ag_ui.core.events import CustomEvent, EventType, RunErrorEvent  # noqa: E402
+from ag_ui.core.types import RunAgentInput, UserMessage  # noqa: E402
+from ag_ui.encoder import EventEncoder  # noqa: E402
 from lib.toolsets import CareerCaddyDeps  # noqa: E402
 from lib.usage_reporter import report_usage  # noqa: E402
 from agents.agent_factory import get_agent, register_defaults  # noqa: E402
@@ -213,82 +209,58 @@ CRITICAL: ALWAYS use markdown link syntax: [text](/path). NEVER output raw HTML
 anchor tags like <a href="...">. Raw HTML links produce malformed URLs (e.g.
 https://resumes/31 instead of /resumes/31) and break SPA navigation.
 
-## Navigation — IMPORTANT
-When the user says "take me to", "go to", "navigate to", "open", or "show me"
-a page, they want to be NAVIGATED there — NOT shown the data. Do NOT call tools
-to fetch the resource. Instead, respond with a short confirmation and include a
-hidden HTML comment that triggers navigation:
+## Navigation & Action Buttons — call the `propose_actions` tool
+When the user wants to GO somewhere, or you have a natural follow-up after
+completing an action, DO NOT emit fenced JSON and DO NOT emit HTML comments.
+Instead, call the `propose_actions` tool with 1–3 action objects. The
+frontend renders each as a clickable button that acts without another LLM
+turn (for navigate / model) or triggers a follow-up turn (for message).
 
-<!-- navigate:/resumes -->
+Each action sets EXACTLY ONE of these three keys alongside `label`:
 
-The frontend detects this marker and navigates the user's browser automatically.
-
-Navigation targets (use these, not resource IDs, for list pages):
-- "my resumes"       → <!-- navigate:/resumes -->
-- "my job posts"     → <!-- navigate:/job-posts -->
-- "my applications"  → <!-- navigate:/job-applications -->
-- "my companies"     → <!-- navigate:/companies -->
-- "my scores"        → <!-- navigate:/scores -->
-- "career data"      → <!-- navigate:/career-data -->
-- "settings"         → <!-- navigate:/settings -->
-
-For a specific resource, use the ID:
-- "show me job post 42" → <!-- navigate:/job-posts/42 -->
-
-Always include a visible markdown link too so the user sees where they're going.
-Example response: "Taking you to your [resumes](/resumes) now! <!-- navigate:/resumes -->"
-
-Only fetch data when the user asks a QUESTION about the data (e.g. "how many
-resumes do I have?", "what jobs have I applied to?"). If they just want to GO
-somewhere, navigate — do not dump data.
-
-## Action Buttons (Elicitation)
-When you complete an action that has a natural follow-up, offer the user quick
-action buttons by including a JSON block at the END of your response (after all
-text). The frontend will render clickable buttons. Each action takes EXACTLY
-ONE of three shapes — pick the shape that matches what the button should DO:
-
-- `{{"label": "Go there", "navigate": "/path"}}` — transitions the frontend
-  directly. Zero LLM turns. USE THIS for "View resumes", "Open settings",
-  "Take me to career data", "See this score", anything whose natural
+- `navigate: "/path"` — route transition, zero LLM cost. USE THIS for
+  "View resumes", "Open settings", "See this score", anything whose natural
   outcome is "the user is now on page X".
 
-- `{{"label": "Mark favorite", "model": {{"type": "resume", "id": 42, "patch": {{"favorite": true}}}}}}` —
-  saves an Ember Data record directly. Zero LLM turns. USE THIS for
-  "Favorite this resume", "Dismiss guidance" (user.onboarding toggle),
-  "Mark reviewed", "Star this answer". Allowed `type` + `patch` keys:
+- `model: {{"type": "...", "id": N, "patch": {{...}}}}` — direct Ember Data
+  save, zero LLM cost. USE THIS for "Favorite this resume", "Dismiss
+  guidance" (user.onboarding toggle), "Mark reviewed", "Star this answer".
+  Allowed `type` + `patch` keys:
     - `resume`: favorite, title, name, notes
     - `cover-letter`: favorite, status
     - `answer`: favorite
     - `job-post`: favorite
-    - `user`: onboarding (only; patch nested keys under onboarding)
-  Any other key is silently dropped by the frontend.
+    - `user`: onboarding (nest onboarding sub-keys under "onboarding")
+  Any other key is silently dropped client-side.
 
-- `{{"label": "Tell me more", "message": "..."}}` — sends a new chat
-  message as the user. COSTS AN LLM TURN. Use this only when a button
-  genuinely needs the agent to think again (follow-up question, new
-  scope). Do NOT use this for navigation or simple state changes — the
-  other two shapes are cheaper and instant.
+- `message: "follow-up turn"` — sends a new user message, COSTS AN LLM TURN.
+  Use only when a button genuinely needs the agent to think again (new
+  scope, ambiguous follow-up). Do NOT use this for navigation or state
+  changes — the other two shapes are cheaper and instant.
 
-Full JSON envelope:
-
-```json
-{{"elicitation": true, "actions": [{{"label": "...", "navigate": "/..."}}, ...]}}
-```
+When the user says "take me to", "go to", "navigate to", "open", or "show me"
+a page: call `propose_actions` with a single `navigate` action. Do NOT fetch
+the resource's data — they want to be taken there, not read about it.
 
 Examples:
-- After creating a job post with id 42: `[{{"label": "View job post", "navigate": "/job-posts/42"}}, {{"label": "Score it", "message": "score this job post"}}]`
-- After surfacing a resume:
-  `[{{"label": "Open resume", "navigate": "/resumes/N"}}, {{"label": "Favorite", "model": {{"type": "resume", "id": N, "patch": {{"favorite": true}}}}}}]`
-- User said "stop giving me advice":
-  `[{{"label": "Turn off wizard", "model": {{"type": "user", "id": ME, "patch": {{"onboarding": {{"wizard_enabled": false}}}}}}}}, {{"label": "Take me to settings", "navigate": "/settings/profile/edit"}}]`
+- User says "take me to my resumes" →
+  call `propose_actions(actions=[{{"label": "Open resumes", "navigate": "/resumes"}}])`
+- After creating a job post with id 42 →
+  call `propose_actions(actions=[{{"label": "View job post", "navigate": "/job-posts/42"}}, {{"label": "Score it", "message": "score this job post"}}])`
+- After surfacing a resume →
+  call `propose_actions(actions=[{{"label": "Open resume", "navigate": "/resumes/N"}}, {{"label": "Favorite", "model": {{"type": "resume", "id": N, "patch": {{"favorite": true}}}}}}])`
+- User says "stop giving me advice" →
+  call `propose_actions(actions=[{{"label": "Turn off wizard", "model": {{"type": "user", "id": ME, "patch": {{"onboarding": {{"wizard_enabled": false}}}}}}}}, {{"label": "Take me to settings", "navigate": "/settings/profile/edit"}}])`
 
 Rules:
-- Maximum 3 actions per elicitation.
-- Only offer actions that make sense in context — do NOT add buttons to every response.
-- Label: short (2-5 words), imperative.
-- Prefer `navigate` and `model` over `message`. A button that explains
-  where to go is worse than a button that takes them there.
+- Maximum 3 actions per call.
+- Only call `propose_actions` when it makes sense — do NOT bolt buttons
+  onto every response.
+- Label: short (2–5 words), imperative.
+- Prefer `navigate` and `model` over `message`.
+- Only fetch data when the user asks a QUESTION about the data (e.g. "how
+  many resumes do I have?"). If they just want to GO somewhere, use
+  `propose_actions` with a navigate action — do not dump data.
 
 ## Page-Aware Data Access
 When the user asks about "this page", "what's here", "what do I have", or anything
@@ -339,11 +311,8 @@ under a question), you know which question they're looking at. If they ask you t
    see the answer on the page. Instead, briefly explain your reasoning or approach
    (e.g. "I emphasized your distributed systems experience because the role requires
    it"). Keep it to 2-3 sentences.
-5. Offer a button to navigate to the answer using the elicitation pattern:
-   ```json
-   {{"elicitation": true, "actions": [{{"label": "View answer", "message": "Navigate to the answer"}}]}}
-   ```
-   And include the navigate marker: <!-- navigate:/questions/{{question_id}}/answers/{{answer_id}} -->
+5. Call `propose_actions` with a single navigate action pointing at the
+   answer: `{{"label": "View answer", "navigate": "/questions/{{question_id}}/answers/{{answer_id}}"}}`.
    NEVER output raw API URLs (like https://...) — always use frontend paths (/questions/ID/answers/ID).
 
 You can also set ai_assist=true on create_answer to let the backend AI generate
@@ -376,9 +345,9 @@ Always address the user by their first name.
 {user_profile}
 
 If the user wants to UPDATE their profile (name, address, phone, etc.), you
-cannot do that directly. Instead, guide them to the settings page:
-"You can update that in [Settings > Profile](/settings)."
-<!-- navigate:/settings -->
+cannot do that directly. Instead, call `propose_actions` with a single
+navigate action to /settings/profile:
+`{{"label": "Open settings", "navigate": "/settings/profile"}}`
 """
 
 
@@ -611,30 +580,53 @@ def _build_agent(
     )
 
 
-async def chat(request: Request):
-    """POST /chat — streaming chat endpoint.
+_TOOL_RELOAD_MAP = {
+    "create_answer": "answer",
+    "update_answer": "answer",
+    "create_job_application": "job-application",
+    "update_job_application": "job-application",
+    "create_job_post_with_company_check": "job-post",
+    "update_job_post": "job-post",
+    "create_company": "company",
+    "create_scrape": "scrape",
+    "update_scrape": "scrape",
+    "score_job_post": "score",
+}
 
-    Request body:
+
+def _parse_sse_chunk(chunk: str) -> dict | None:
+    """Best-effort extraction of the JSON event object from an SSE `data:` line.
+    Returns None for keep-alives, comments, or unparseable chunks.
+    """
+    try:
+        payload = chunk.split("data: ", 1)[1].split("\n\n", 1)[0]
+        return json.loads(payload)
+    except (IndexError, json.JSONDecodeError):
+        return None
+
+
+async def chat(request: Request):
+    """POST /chat — AG-UI-protocol streaming chat endpoint.
+
+    Request body (unchanged from legacy protocol):
         {
             "message": "What job posts do I have?",
             "token": "<jwt-or-api-key>",
-            "history": [
-                {"role": "user", "content": "..."},
-                {"role": "assistant", "content": "..."}
-            ],
-            "conversation_id": "optional-uuid"
+            "history": [{"role": "user", "content": "..."}, ...],
+            "conversation_id": "optional-uuid",
+            "page_context": {...},
+            "onboarding": {...}
         }
 
     The token field accepts either a JWT (forwarded by the Django proxy)
     or a jh_* API key (for direct callers). The Django API's auth stack
     handles both transparently.
 
-    Response: text/event-stream with events:
-        data: {"type": "text", "content": "partial text..."}
-        data: {"type": "tool_call", "name": "get_job_posts", "args": {...}}
-        data: {"type": "tool_result", "name": "get_job_posts", "result": "..."}
-        data: {"type": "done", "content": "full response text"}
-        data: {"type": "error", "content": "error message"}
+    Response: text/event-stream of AG-UI protocol events. Standard vocabulary
+    (RunStarted, TextMessageStart/Content/End, ToolCallStart/Args/End/Result,
+    RunFinished, RunError) plus two CustomEvent extensions:
+      - name: "reload"       value: {"resource": "<ember-type>"}
+      - name: "session_meta" value: {"conversation_id": "...", "usage": {...}}
     """
     try:
         body = await request.json()
@@ -644,7 +636,7 @@ async def chat(request: Request):
     message = body.get("message", "").strip()
     token = body.get("token", "").strip()
     history = body.get("history", [])
-    conversation_id = body.get("conversation_id", str(uuid.uuid4()))
+    conversation_id = body.get("conversation_id") or str(uuid.uuid4())
     page_context = body.get("page_context")
     onboarding = body.get("onboarding")
     if onboarding is not None and not isinstance(onboarding, dict):
@@ -662,6 +654,7 @@ async def chat(request: Request):
         return JSONResponse({"error": "token is required"}, status_code=400)
 
     async def event_stream():
+        encoder = EventEncoder()
         user_profile = await _fetch_user_profile(token)
         agent = _build_agent(
             user_profile,
@@ -679,7 +672,6 @@ async def chat(request: Request):
         # Prefix user message with context so the model sees it inline,
         # not buried in the system prompt where gpt-4o-mini ignores it.
         prefix_parts = []
-        # Extract user's name from profile for identity questions
         for line in user_profile.split("\n"):
             if line.startswith("Name: "):
                 prefix_parts.append(f"[User: {line[6:].strip()}]")
@@ -690,9 +682,12 @@ async def chat(request: Request):
                 prefix_parts.append(f"[Current page: {url}]")
         augmented_message = f"{' '.join(prefix_parts)}\n{message}" if prefix_parts else message
 
-        # Build message history for context
+        # Convert request history (JSON dicts) to pydantic-ai ModelMessage
+        # list so run_ag_ui can pass it through to the agent as
+        # `message_history` (AG-UI's own run_input.messages carries only
+        # the current-turn prompt).
         messages = []
-        for msg in history[-20:]:  # limit context window
+        for msg in history[-20:]:
             role = msg.get("role", "user")
             content = msg.get("content", "")
             if role == "user":
@@ -700,148 +695,92 @@ async def chat(request: Request):
             elif role == "assistant":
                 messages.append(ModelResponse(parts=[TextPart(content=content)]))
 
-        _TOOL_RELOAD_MAP = {
-            "create_answer": "answer",
-            "update_answer": "answer",
-            "create_job_application": "job-application",
-            "update_job_application": "job-application",
-            "create_job_post_with_company_check": "job-post",
-            "update_job_post": "job-post",
-            "create_company": "company",
-            "create_scrape": "scrape",
-            "update_scrape": "scrape",
-            "score_job_post": "score",
-        }
+        # Accumulators spanning the initial pass + any follow-up retries.
         reloaded: set[str] = set()
         full_text = ""
-        total_request_tokens = 0
-        total_response_tokens = 0
-        total_total_tokens = 0
-        total_requests = 0
-        # Full transcript incl. passed-in history — used as `message_history`
-        # when we retry, so the model sees its own promise.
-        last_all_messages = None
-        # Just THIS turn's new messages — used to decide if a tool was
-        # called. Keeps detection unaffected by tool calls from earlier
-        # turns in the passed-in history.
+        usage_total = {
+            "request_tokens": 0,
+            "response_tokens": 0,
+            "total_tokens": 0,
+            "requests": 0,
+        }
+        # Pydantic-AI ModelMessage transcript (incl. history) — retried
+        # passes feed this back in as `message_history` so the model sees
+        # its own previous promise.
+        last_all_messages: list | None = None
+        # This-turn-only messages — used to detect whether a tool fired.
         last_new_messages: list = []
 
         try:
-            async def _stream_once(prompt, history):
-                """Run one agent turn via agent.iter(), surfacing both text
-                and tool-call events to the frontend.
-
-                We switched from run_stream().stream_text() to iter() so the
-                SSE can carry explicit `tool_call_start` / `tool_call_end`
-                events alongside `text` deltas (inspired by pydantic-ai's
-                AG-UI integration). The frontend shows tool activity in a
-                staff-only timeline so the user can see what the agent is
-                actually doing rather than waiting silently while tools fire.
+            async def _run_pass(prompt: str, history_messages: list | None):
+                """One agent turn via AG-UI adapter. Tees the protocol stream
+                to accumulate text (for the unfulfilled-promise heuristic),
+                track tool-call → tool_name, and inject a CustomEvent=reload
+                after any ToolCallResult for a reload-mapped tool.
                 """
-                nonlocal full_text, total_request_tokens, total_response_tokens
-                nonlocal total_total_tokens, total_requests
-                nonlocal last_all_messages, last_new_messages
-                # Tool-call-id → tool_name map so we can correlate
-                # FunctionToolResultEvent (which sometimes omits tool_name)
-                # back to the tool that produced it.
+                nonlocal full_text, last_all_messages, last_new_messages
                 tool_name_by_id: dict[str, str] = {}
 
-                async with agent.iter(
-                    prompt, deps=deps, message_history=history,
-                ) as run:
-                    async for node in run:
-                        if Agent.is_model_request_node(node):
-                            async with node.stream(run.ctx) as req_stream:
-                                async for event in req_stream:
-                                    if isinstance(event, PartStartEvent):
-                                        # Start-of-part events carry the
-                                        # opening slice of whatever part
-                                        # just began. For TextPart that's
-                                        # the first word(s); skipping it
-                                        # chops the response mid-phrase.
-                                        # For ToolCallPart it's the tool
-                                        # name (we use it for correlation
-                                        # when FunctionToolCallEvent lacks
-                                        # a tool_name).
-                                        part = event.part
-                                        initial = getattr(part, "content", None)
-                                        if isinstance(initial, str) and initial:
-                                            full_text += initial
-                                            yield (
-                                                f"data: {json.dumps({'type': 'text', 'content': initial})}\n\n"
-                                            )
-                                        tool_name = getattr(part, "tool_name", None)
-                                        tool_call_id = getattr(part, "tool_call_id", None)
-                                        if tool_name and tool_call_id:
-                                            tool_name_by_id[tool_call_id] = tool_name
-                                    elif isinstance(event, PartDeltaEvent) and isinstance(
-                                        event.delta, TextPartDelta
-                                    ):
-                                        chunk = event.delta.content_delta
-                                        if chunk:
-                                            full_text += chunk
-                                            yield (
-                                                f"data: {json.dumps({'type': 'text', 'content': chunk})}\n\n"
-                                            )
-                        elif Agent.is_call_tools_node(node):
-                            async with node.stream(run.ctx) as tool_stream:
-                                async for event in tool_stream:
-                                    if isinstance(event, FunctionToolCallEvent):
-                                        part = event.part
-                                        tool_call_id = getattr(part, "tool_call_id", "")
-                                        tool_name = getattr(part, "tool_name", "")
-                                        if tool_call_id and tool_name:
-                                            tool_name_by_id[tool_call_id] = tool_name
-                                        # `part.args` may be a dict or a
-                                        # JSON string depending on the model;
-                                        # normalize to a dict for the client.
-                                        args = getattr(part, "args", None)
-                                        if isinstance(args, str):
-                                            try:
-                                                args = json.loads(args) if args else {}
-                                            except json.JSONDecodeError:
-                                                args = {"_raw": args}
-                                        yield (
-                                            f"data: {json.dumps({'type': 'tool_call_start', 'tool_call_id': tool_call_id, 'tool_name': tool_name, 'args': args})}\n\n"
-                                        )
-                                    elif isinstance(event, FunctionToolResultEvent):
-                                        tool_call_id = getattr(event, "tool_call_id", "")
-                                        tool_name = tool_name_by_id.get(tool_call_id, "")
-                                        result_obj = getattr(event, "result", None)
-                                        content = getattr(result_obj, "content", "") if result_obj else ""
-                                        # Truncate long tool outputs before
-                                        # sending over SSE — staff doesn't need
-                                        # the full payload for feedback.
-                                        if isinstance(content, str) and len(content) > 500:
-                                            content = content[:500] + "... (truncated)"
-                                        yield (
-                                            f"data: {json.dumps({'type': 'tool_call_end', 'tool_call_id': tool_call_id, 'tool_name': tool_name, 'content': content})}\n\n"
-                                        )
-                                        if tool_name in _TOOL_RELOAD_MAP:
-                                            resource = _TOOL_RELOAD_MAP[tool_name]
-                                            if resource not in reloaded:
-                                                reloaded.add(resource)
-                                                yield (
-                                                    f"data: {json.dumps({'type': 'reload', 'resource': resource})}\n\n"
-                                                )
-                    # After the async-for exits, run.result holds the final
-                    # AgentRunResult. Grab usage + messages from it.
-                    final = run.result
-                    if final is None:
-                        return
-                    usage = final.usage()
-                    total_request_tokens += usage.request_tokens or 0
-                    total_response_tokens += usage.response_tokens or 0
-                    total_total_tokens += usage.total_tokens or 0
-                    total_requests += usage.requests or 0
-                    last_all_messages = final.all_messages()
-                    if hasattr(final, "new_messages"):
-                        last_new_messages = final.new_messages()
+                run_input = RunAgentInput(
+                    thread_id=conversation_id,
+                    run_id=str(uuid.uuid4()),
+                    state={},
+                    messages=[UserMessage(id=str(uuid.uuid4()), content=prompt)],
+                    tools=[],
+                    context=[],
+                    forwarded_props={},
+                )
+
+                def _on_complete(result):
+                    nonlocal last_all_messages, last_new_messages
+                    last_all_messages = result.all_messages()
+                    if hasattr(result, "new_messages"):
+                        last_new_messages = result.new_messages()
                     else:
                         last_new_messages = last_all_messages
+                    u = result.usage()
+                    usage_total["request_tokens"] += u.request_tokens or 0
+                    usage_total["response_tokens"] += u.response_tokens or 0
+                    usage_total["total_tokens"] += u.total_tokens or 0
+                    usage_total["requests"] += u.requests or 0
 
-            # First turn.
-            async for event in _stream_once(
+                stream = run_ag_ui(
+                    agent,
+                    run_input,
+                    deps=deps,
+                    message_history=history_messages,
+                    on_complete=_on_complete,
+                )
+
+                async for chunk in stream:
+                    ev = _parse_sse_chunk(chunk)
+                    if ev is not None:
+                        et = ev.get("type", "")
+                        if et == EventType.TEXT_MESSAGE_CONTENT.value:
+                            full_text += ev.get("delta", "")
+                        elif et == EventType.TOOL_CALL_START.value:
+                            tcid = ev.get("toolCallId", "")
+                            tname = ev.get("toolCallName", "")
+                            if tcid and tname:
+                                tool_name_by_id[tcid] = tname
+
+                    yield chunk
+
+                    if ev is not None and ev.get("type") == EventType.TOOL_CALL_RESULT.value:
+                        tcid = ev.get("toolCallId", "")
+                        tname = tool_name_by_id.get(tcid, "")
+                        if tname in _TOOL_RELOAD_MAP:
+                            resource = _TOOL_RELOAD_MAP[tname]
+                            if resource not in reloaded:
+                                reloaded.add(resource)
+                                yield encoder.encode(
+                                    CustomEvent(
+                                        name="reload",
+                                        value={"resource": resource},
+                                    )
+                                )
+
+            async for event in _run_pass(
                 augmented_message, messages if messages else None
             ):
                 yield event
@@ -859,28 +798,28 @@ async def chat(request: Request):
                     "Detected unfulfilled promise (retry %s/%s); re-priming agent",
                     retries, _MAX_FOLLOWUP_RETRIES,
                 )
-                async for event in _stream_once(
+                async for event in _run_pass(
                     _FOLLOWUP_PRIMING, last_all_messages
                 ):
                     yield event
 
             logger.info(
-                "Chat usage (incl. retries): request_tokens=%s response_tokens=%s total=%s requests=%s",
-                total_request_tokens, total_response_tokens,
-                total_total_tokens, total_requests,
+                "Chat usage (incl. retries): %s",
+                usage_total,
             )
 
-            done_event = json.dumps({
-                "type": "done",
-                "content": full_text,
-                "conversation_id": conversation_id,
-                "usage": {
-                    "request_tokens": total_request_tokens,
-                    "response_tokens": total_response_tokens,
-                    "total_tokens": total_total_tokens,
-                },
-            })
-            yield f"data: {done_event}\n\n"
+            # Session metadata — carries conversation_id + usage that AG-UI's
+            # RunFinishedEvent doesn't have slots for. Frontend reads this
+            # after the terminal RunFinished to finalize the message.
+            yield encoder.encode(
+                CustomEvent(
+                    name="session_meta",
+                    value={
+                        "conversation_id": conversation_id,
+                        "usage": dict(usage_total),
+                    },
+                )
+            )
 
             # pydantic-ai RequestUsage has a `.requests` attr the usage
             # reporter expects; build a lightweight shim.
@@ -890,20 +829,14 @@ async def chat(request: Request):
                 api_token=token,
                 agent_name="career_caddy_chat",
                 model_name=DEFAULT_MODEL,
-                usage=SimpleNamespace(
-                    request_tokens=total_request_tokens,
-                    response_tokens=total_response_tokens,
-                    total_tokens=total_total_tokens,
-                    requests=total_requests,
-                ),
+                usage=SimpleNamespace(**usage_total),
                 trigger="chat",
                 base_url=API_BASE_URL,
             ))
 
         except Exception as e:
             logger.exception("Chat agent error")
-            error_event = json.dumps({"type": "error", "content": str(e)})
-            yield f"data: {error_event}\n\n"
+            yield encoder.encode(RunErrorEvent(message=str(e)))
 
     return StreamingResponse(
         event_stream(),

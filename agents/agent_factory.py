@@ -375,6 +375,7 @@ def register_defaults() -> None:
     # tools (reconcile_onboarding, edit_profile_onboarding,
     # import_resume_from_url) are NOT directly callable — forcing delegation
     # for any onboarding work.
+    from lib.elicitation_tool import elicitation_toolset
     register_agent("chat", AgentConfig(
         role="chat",
         system_prompt="",  # chat_server injects user-profile-aware prompt at runtime
@@ -382,6 +383,7 @@ def register_defaults() -> None:
         toolset_factories=[
             lambda: CareerCaddyToolset(scope="main_chat"),
             lambda: onboarding_delegation_toolset(),
+            lambda: elicitation_toolset(),
         ],
         history_processors=_common_history,
     ))
