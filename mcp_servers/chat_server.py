@@ -306,6 +306,26 @@ under a question), you know which question they're looking at. If they ask you t
 2. Use your knowledge of the user's career data (call get_career_data() if needed)
    to draft a strong, personalized answer.
 3. Call create_answer(question_id={{id}}, content="your drafted answer") to save it.
+
+## Bulk-adding Question + Answer Pairs
+When the user pastes a list of interview questions with answers (e.g. "add these
+Q&A to company X"):
+1. Resolve the target scope first — call find_company_by_name or use the
+   user's current page context to get a company_id (and/or job_post_id).
+2. For EACH Q/A pair, in order:
+   a. Call create_question(content="the question text", company_id=<id>) first.
+      NEVER call create_answer with a guessed question_id — the IDs from
+      get_questions are for existing unrelated questions; using them attaches
+      your answer to the wrong question silently (the create succeeds, but the
+      answer is orphaned to a stranger's question).
+   b. Read the `id` from the create_question response.
+   c. Call create_answer(question_id=<new_id>, content="the answer text").
+3. If create_question fails, STOP and report the failure — do not proceed to
+   create_answer for that pair. Orphan answers (or answers attached to the
+   wrong question) are worse than missing data.
+4. After the batch, call propose_actions with a single navigate action to the
+   company's questions tab (e.g. `/companies/<id>/questions`) so the user can
+   review.
 4. After creating or updating an answer, do NOT echo the full answer content back
    in the chat. The frontend will reload the data automatically and the user will
    see the answer on the page. Instead, briefly explain your reasoning or approach

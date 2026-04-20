@@ -66,6 +66,7 @@ TOOL_REGISTRY: dict[str, Any] = {
     "get_resumes": api_tools.get_resumes,
     # Questions & Answers
     "get_questions": api_tools.get_questions,
+    "create_question": api_tools.create_question,
     "get_answers": api_tools.get_answers,
     "create_answer": api_tools.create_answer,
     "update_answer": api_tools.update_answer,
@@ -104,6 +105,7 @@ SCOPES: dict[str, set[str]] = {
         "get_career_data",
         "get_resumes",
         "get_questions",
+        "create_question",
         "get_answers",
         "create_answer",
         "update_answer",

@@ -812,6 +812,38 @@ async def get_questions(
     return await api.get("/api/v1/questions/", params=params)
 
 
+async def create_question(
+    api: ApiClient,
+    content: str,
+    company_id: Optional[int] = None,
+    job_post_id: Optional[int] = None,
+    job_application_id: Optional[int] = None,
+) -> str:
+    """Create an interview question. Supply at least one of company_id, job_post_id, or job_application_id so the question is scoped — unscoped questions are hard to find later. Always check get_questions first to avoid duplicates."""
+    relationships: dict = {}
+    if company_id is not None:
+        relationships["company"] = {
+            "data": {"type": "company", "id": str(company_id)}
+        }
+    if job_post_id is not None:
+        relationships["jobPost"] = {
+            "data": {"type": "job-post", "id": str(job_post_id)}
+        }
+    if job_application_id is not None:
+        relationships["jobApplication"] = {
+            "data": {"type": "job-application", "id": str(job_application_id)}
+        }
+    payload: dict = {
+        "data": {
+            "type": "question",
+            "attributes": {"content": content},
+        }
+    }
+    if relationships:
+        payload["data"]["relationships"] = relationships
+    return await api.post("/api/v1/questions/", payload)
+
+
 async def get_answers(
     api: ApiClient,
     id: Optional[int] = None,
