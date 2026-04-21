@@ -90,4 +90,9 @@ def setup_logfire(service_name: str, *, instrument_llm: bool = True) -> bool:
                 )
 
     os.environ[_SETUP_DONE_KEY] = "1"
+    logging.getLogger(__name__).info(
+        "logfire configured — service=%s instrument_llm=%s",
+        service_name,
+        instrument_llm,
+    )
     return True
