@@ -587,17 +587,26 @@ def _build_agent(
     user_profile: str,
     page_context: dict | None = None,
     onboarding: dict | None = None,
+    smart: bool = False,
 ):
-    """Build a fresh agent with all career caddy tools."""
+    """Build a fresh agent with all career caddy tools.
+
+    When `smart` is True the chat frontend is asking for a stronger model
+    on this turn — see the toggle in <Chat::Panel>. The target is read
+    from CHAT_SMART_MODEL (default: anthropic:claude-sonnet-4-6) so ops
+    can swap without a redeploy.
+    """
     prompt = _build_system_prompt(
         user_profile,
         page_context=page_context,
         onboarding=onboarding,
     )
-    return get_agent(
-        "chat",
-        system_prompt=prompt,
-    )
+    overrides = {"system_prompt": prompt}
+    if smart:
+        overrides["model"] = os.environ.get(
+            "CHAT_SMART_MODEL", "anthropic:claude-sonnet-4-6"
+        )
+    return get_agent("chat", **overrides)
 
 
 _TOOL_RELOAD_MAP = {
@@ -659,6 +668,7 @@ async def chat(request: Request):
     conversation_id = body.get("conversation_id") or str(uuid.uuid4())
     page_context = body.get("page_context")
     onboarding = body.get("onboarding")
+    smart = bool(body.get("smart"))
     if onboarding is not None and not isinstance(onboarding, dict):
         logger.warning("Ignoring non-dict onboarding payload: %r", type(onboarding))
         onboarding = None
@@ -680,7 +690,10 @@ async def chat(request: Request):
             user_profile,
             page_context=page_context,
             onboarding=onboarding,
+            smart=smart,
         )
+        if smart:
+            logger.info("chat: smart model requested for this turn")
         deps = CareerCaddyDeps(
             api_token=token,
             base_url=API_BASE_URL,
