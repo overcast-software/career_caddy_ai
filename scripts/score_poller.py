@@ -80,7 +80,7 @@ async def _collect_candidates(api: ApiClient, limit: int) -> list[int]:
             api,
             status="completed",
             has_score=False,
-            sort="-updated_at",
+            sort="-scraped_at",
             per_page=limit * 2,
         )
         resp = json.loads(raw)
