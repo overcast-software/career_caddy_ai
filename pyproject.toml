@@ -13,7 +13,11 @@ dependencies = [
     "rich<14",
     "html2text",
     "beautifulsoup4",
-    "logfire",
+    # logfire[httpx] pulls opentelemetry-instrumentation-httpx so
+    # logfire.instrument_httpx() actually wires in. Without the extra
+    # the instrumenter fails at runtime and tools silently skip HTTP
+    # spans.
+    "logfire[httpx]",
     "pyyaml",
     "camoufox>=0.4.11",
     "playwright-stealth>=1.0.6",

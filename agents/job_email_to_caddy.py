@@ -18,8 +18,10 @@ import asyncio
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-logfire.configure(service_name="job_url_to_caddy")
-logfire.instrument_pydantic_ai()
+
+from lib.logfire_setup import setup_logfire  # noqa: E402
+
+setup_logfire("job_url_to_caddy")
 
 register_defaults()
 

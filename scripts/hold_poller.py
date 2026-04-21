@@ -42,6 +42,11 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+
+from lib.logfire_setup import setup_logfire  # noqa: E402
+
+setup_logfire("hold_poller")
+
 logger = logging.getLogger("hold_poller")
 
 POLL_INTERVAL = int(os.environ.get("HOLD_POLL_INTERVAL", "30"))

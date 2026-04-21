@@ -51,11 +51,9 @@ from agents.agent_factory import get_agent, register_defaults  # noqa: E402
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-if os.environ.get("LOGFIRE_TOKEN"):
-    import logfire
+from lib.logfire_setup import setup_logfire  # noqa: E402
 
-    logfire.configure(service_name="chat_server", scrubbing=False, console=False)
-    logfire.instrument_pydantic_ai()
+setup_logfire("chat_server")
 
 API_BASE_URL = os.environ.get("CC_API_BASE_URL", "http://localhost:8000")
 DEFAULT_MODEL = os.environ.get("CHAT_MODEL", "openai:gpt-4o-mini")
@@ -472,6 +470,38 @@ _FOLLOWUP_PRIMING = (
 )
 
 
+def _sanitize_for_anthropic(messages):
+    """Strip tool_use / tool_result / retry parts from pydantic-ai
+    ModelMessages before re-feeding as message_history.
+
+    Anthropic's API 400s with 'unexpected tool_use_id in tool_result
+    blocks' when a tool_result appears without its paired tool_use in
+    an earlier message — which happens when all_messages() from pass 1
+    is fed back as history and the adapter serializes a tool_result
+    whose tool_use was elided or lived in the same ModelResponse we
+    already truncated. Safer: keep only user-text and assistant-text
+    parts across retry passes. The retry priming prompt re-establishes
+    context in prose.
+    """
+    if not messages:
+        return messages
+    safe = []
+    for m in messages:
+        parts = getattr(m, "parts", None)
+        if parts is None:
+            safe.append(m)
+            continue
+        kept = [
+            p
+            for p in parts
+            if isinstance(p, (UserPromptPart, TextPart))
+        ]
+        if not kept:
+            continue
+        safe.append(m.__class__(parts=kept))
+    return safe
+
+
 def _response_has_tool_call(messages) -> bool:
     """True if any ToolCallPart appears in the run's messages."""
     for msg in messages:
@@ -587,17 +617,26 @@ def _build_agent(
     user_profile: str,
     page_context: dict | None = None,
     onboarding: dict | None = None,
+    smart: bool = False,
 ):
-    """Build a fresh agent with all career caddy tools."""
+    """Build a fresh agent with all career caddy tools.
+
+    When `smart` is True the chat frontend is asking for a stronger model
+    on this turn — see the toggle in <Chat::Panel>. The target is read
+    from CHAT_SMART_MODEL (default: anthropic:claude-sonnet-4-6) so ops
+    can swap without a redeploy.
+    """
     prompt = _build_system_prompt(
         user_profile,
         page_context=page_context,
         onboarding=onboarding,
     )
-    return get_agent(
-        "chat",
-        system_prompt=prompt,
-    )
+    overrides = {"system_prompt": prompt}
+    if smart:
+        overrides["model"] = os.environ.get(
+            "CHAT_SMART_MODEL", "anthropic:claude-sonnet-4-6"
+        )
+    return get_agent("chat", **overrides)
 
 
 _TOOL_RELOAD_MAP = {
@@ -659,6 +698,7 @@ async def chat(request: Request):
     conversation_id = body.get("conversation_id") or str(uuid.uuid4())
     page_context = body.get("page_context")
     onboarding = body.get("onboarding")
+    smart = bool(body.get("smart"))
     if onboarding is not None and not isinstance(onboarding, dict):
         logger.warning("Ignoring non-dict onboarding payload: %r", type(onboarding))
         onboarding = None
@@ -680,7 +720,10 @@ async def chat(request: Request):
             user_profile,
             page_context=page_context,
             onboarding=onboarding,
+            smart=smart,
         )
+        if smart:
+            logger.info("chat: smart model requested for this turn")
         deps = CareerCaddyDeps(
             api_token=token,
             base_url=API_BASE_URL,
@@ -819,7 +862,8 @@ async def chat(request: Request):
                     retries, _MAX_FOLLOWUP_RETRIES,
                 )
                 async for event in _run_pass(
-                    _FOLLOWUP_PRIMING, last_all_messages
+                    _FOLLOWUP_PRIMING,
+                    _sanitize_for_anthropic(last_all_messages),
                 ):
                     yield event
 
@@ -845,12 +889,22 @@ async def chat(request: Request):
             # reporter expects; build a lightweight shim.
             from types import SimpleNamespace
 
+            # Track which model actually ran so the spend breakdown
+            # attributes tokens correctly when the smart toggle routed
+            # the turn to CHAT_SMART_MODEL. trigger='chat_smart' for
+            # smart runs so admins can filter by trigger instead of
+            # regex'ing model_name.
+            effective_model = (
+                os.environ.get("CHAT_SMART_MODEL", "anthropic:claude-sonnet-4-6")
+                if smart
+                else DEFAULT_MODEL
+            )
             asyncio.create_task(report_usage(
                 api_token=token,
                 agent_name="career_caddy_chat",
-                model_name=DEFAULT_MODEL,
+                model_name=effective_model,
                 usage=SimpleNamespace(**usage_total),
-                trigger="chat",
+                trigger="chat_smart" if smart else "chat",
                 base_url=API_BASE_URL,
             ))
 

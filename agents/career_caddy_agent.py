@@ -13,12 +13,10 @@ from lib.usage_reporter import report_usage
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-if os.environ.get("LOGFIRE_TOKEN"):
-    logfire.configure(
-        service_name="career_caddy_agent",
-        scrubbing=False,
-    )
-    logfire.instrument_pydantic_ai()
+
+from lib.logfire_setup import setup_logfire  # noqa: E402
+
+setup_logfire("career_caddy_agent")
 
 
 class CareerCaddyResponse(BaseModel):
