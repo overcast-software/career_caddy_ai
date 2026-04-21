@@ -858,12 +858,22 @@ async def chat(request: Request):
             # reporter expects; build a lightweight shim.
             from types import SimpleNamespace
 
+            # Track which model actually ran so the spend breakdown
+            # attributes tokens correctly when the smart toggle routed
+            # the turn to CHAT_SMART_MODEL. trigger='chat_smart' for
+            # smart runs so admins can filter by trigger instead of
+            # regex'ing model_name.
+            effective_model = (
+                os.environ.get("CHAT_SMART_MODEL", "anthropic:claude-sonnet-4-6")
+                if smart
+                else DEFAULT_MODEL
+            )
             asyncio.create_task(report_usage(
                 api_token=token,
                 agent_name="career_caddy_chat",
-                model_name=DEFAULT_MODEL,
+                model_name=effective_model,
                 usage=SimpleNamespace(**usage_total),
-                trigger="chat",
+                trigger="chat_smart" if smart else "chat",
                 base_url=API_BASE_URL,
             ))
 
