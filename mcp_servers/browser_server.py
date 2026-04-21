@@ -55,10 +55,12 @@ from lib.browser.credentials import Credentials
 from lib.browser.firefox_cookies import load_cookies_for_domain
 from lib.browser.session_store import SessionStore
 
-if _logfire_available and os.environ.get("LOGFIRE_TOKEN"):
-    logfire.configure(scrubbing=False, service_name="browser_mcp_server", console=False)
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("fastmcp").setLevel(logging.ERROR)
+
+from lib.logfire_setup import setup_logfire  # noqa: E402
+
+setup_logfire("browser_mcp_server")
 
 logger = logging.getLogger(__name__)
 

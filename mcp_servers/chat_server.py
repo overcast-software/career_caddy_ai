@@ -51,11 +51,9 @@ from agents.agent_factory import get_agent, register_defaults  # noqa: E402
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-if os.environ.get("LOGFIRE_TOKEN"):
-    import logfire
+from lib.logfire_setup import setup_logfire  # noqa: E402
 
-    logfire.configure(service_name="chat_server", scrubbing=False, console=False)
-    logfire.instrument_pydantic_ai()
+setup_logfire("chat_server")
 
 API_BASE_URL = os.environ.get("CC_API_BASE_URL", "http://localhost:8000")
 DEFAULT_MODEL = os.environ.get("CHAT_MODEL", "openai:gpt-4o-mini")

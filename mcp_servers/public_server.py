@@ -32,6 +32,9 @@ sys.path.insert(0, str(project_root))
 
 from lib.api_tools import ApiClient  # noqa: E402
 from lib import api_tools  # noqa: E402
+from lib.logfire_setup import setup_logfire  # noqa: E402
+
+setup_logfire("public_mcp_server")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
