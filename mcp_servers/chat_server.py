@@ -472,6 +472,38 @@ _FOLLOWUP_PRIMING = (
 )
 
 
+def _sanitize_for_anthropic(messages):
+    """Strip tool_use / tool_result / retry parts from pydantic-ai
+    ModelMessages before re-feeding as message_history.
+
+    Anthropic's API 400s with 'unexpected tool_use_id in tool_result
+    blocks' when a tool_result appears without its paired tool_use in
+    an earlier message — which happens when all_messages() from pass 1
+    is fed back as history and the adapter serializes a tool_result
+    whose tool_use was elided or lived in the same ModelResponse we
+    already truncated. Safer: keep only user-text and assistant-text
+    parts across retry passes. The retry priming prompt re-establishes
+    context in prose.
+    """
+    if not messages:
+        return messages
+    safe = []
+    for m in messages:
+        parts = getattr(m, "parts", None)
+        if parts is None:
+            safe.append(m)
+            continue
+        kept = [
+            p
+            for p in parts
+            if isinstance(p, (UserPromptPart, TextPart))
+        ]
+        if not kept:
+            continue
+        safe.append(m.__class__(parts=kept))
+    return safe
+
+
 def _response_has_tool_call(messages) -> bool:
     """True if any ToolCallPart appears in the run's messages."""
     for msg in messages:
@@ -832,7 +864,8 @@ async def chat(request: Request):
                     retries, _MAX_FOLLOWUP_RETRIES,
                 )
                 async for event in _run_pass(
-                    _FOLLOWUP_PRIMING, last_all_messages
+                    _FOLLOWUP_PRIMING,
+                    _sanitize_for_anthropic(last_all_messages),
                 ):
                     yield event
 
