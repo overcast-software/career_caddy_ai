@@ -1061,7 +1061,52 @@ async def _scrape_on_page(page, url: str, norm_domain: str, css_selectors: dict)
 
         return json.dumps(result)
     except Exception as e:
+        # Full traceback so a recurrence can be diagnosed from logs —
+        # str(e) alone loses the frame that failed. "Target page,
+        # context or browser has been closed" is the prime example:
+        # we need to know whether it came from goto, screenshot, or
+        # inner_text.
+        logger.exception("scrape failed on %s", url)
         return json.dumps({"error": str(e)})
+
+
+# Substrings signalling the browser subprocess or its IPC died mid-scrape.
+# These are almost always transient (camoufox/Firefox crash, socket reset);
+# a fresh launch is usually enough. Keep the list tight — matching other
+# Playwright errors would mask real bugs.
+_TRANSIENT_BROWSER_ERRORS = (
+    "Target page, context or browser has been closed",
+    "Browser has been closed",
+    "Connection closed",
+)
+
+
+def _is_transient_browser_error(error_message: str) -> bool:
+    return any(needle in error_message for needle in _TRANSIENT_BROWSER_ERRORS)
+
+
+async def _scrape_page_once(
+    url: str, cookies: list[dict], norm_domain: str, css_selectors: dict
+) -> dict:
+    """One launch-scrape-teardown pass. Returns the parsed scrape dict so
+    the caller can branch on `result["error"]` without re-parsing JSON.
+    Factored out so scrape_page can retry on transient browser-died errors
+    without duplicating setup."""
+    try:
+        async with launch_browser(get_engine(), _is_headless()) as browser:
+            ctx = await browser.new_context()
+            if cookies:
+                await ctx.add_cookies(cookies)
+            page = await ctx.new_page()
+            raw = await _scrape_on_page(page, url, norm_domain, css_selectors)
+    except BrowserEngineError as exc:
+        return {"error": str(exc)}
+    try:
+        return json.loads(raw)
+    except ValueError:
+        # _scrape_on_page is contractually JSON, but be defensive — if
+        # somehow it returns garbage we still want to report it cleanly.
+        return {"error": "non-json scrape result", "raw": raw}
 
 
 @server.tool()
@@ -1070,17 +1115,20 @@ async def scrape_page(url: str, profile: dict | None = None) -> str:
 
     Kept for the MCP tool interface. Attended mode uses scrape_page_attended
     with a ResidentBrowser for persistent captcha-warm sessions.
+
+    Retries once on transient browser-died errors (subprocess crash, IPC
+    reset). Further failures return the error to the caller as before.
     """
     _, norm_domain, cookies, css_selectors = _resolve_scrape_inputs(url, profile)
-    try:
-        async with launch_browser(get_engine(), _is_headless()) as browser:
-            ctx = await browser.new_context()
-            if cookies:
-                await ctx.add_cookies(cookies)
-            page = await ctx.new_page()
-            return await _scrape_on_page(page, url, norm_domain, css_selectors)
-    except BrowserEngineError as exc:
-        return json.dumps({"error": str(exc)})
+    result = await _scrape_page_once(url, cookies, norm_domain, css_selectors)
+    error = result.get("error")
+    if error and _is_transient_browser_error(error):
+        logger.warning(
+            "scrape_page: transient browser error on %s, retrying once: %s",
+            url, error,
+        )
+        result = await _scrape_page_once(url, cookies, norm_domain, css_selectors)
+    return json.dumps(result)
 
 
 async def scrape_page_attended(resident, url: str, profile: dict | None = None) -> str:
