@@ -507,12 +507,34 @@ class ExtractFail(BaseNode[ScrapeGraphState, None, dict]):  # type: ignore[no-re
         self, ctx: GraphRunContext[ScrapeGraphState, None]
     ) -> End[dict]:
         from .nodes_scrape import _patch_scrape_status
+        from ._artifacts import capture_debug_artifact
         started = time.time()
         state = ctx.state
         state.outcome = "failure"
         state.failure_reason = state.failure_reason or "extraction"
+
+        # Debug-artifact invariant — see ObstacleFail for the same
+        # pattern. Extraction fails after Capture already ran, so html
+        # is usually populated; the helper is still useful for the
+        # screenshot (capture timing drift) and the rare path where
+        # PersistScrape's PATCH failed and html is empty.
+        page = getattr(state, "_browser_page", None)
+        artifact_info: dict = {}
+        try:
+            artifact_info = await capture_debug_artifact(
+                page, state, reason="extract_fail",
+            )
+        except Exception:
+            logger.warning(
+                "ExtractFail: debug artifact capture failed scrape_id=%s",
+                state.scrape_id, exc_info=True,
+            )
+
         _patch_scrape_status(state.scrape_id, "failed", note=state.failure_reason)
-        trace_node(state, "ExtractFail", "End", started)
+        trace_node(
+            state, "ExtractFail", "End", started,
+            payload=artifact_info or None,
+        )
         return End({
             "outcome": "failure",
             "failure_reason": state.failure_reason,
