@@ -250,10 +250,26 @@ class ObstacleFail(BaseNode[ScrapeGraphState, None, dict]):  # type: ignore[no-r
         self, ctx: GraphRunContext[ScrapeGraphState, None]
     ) -> End[dict]:
         from .nodes_scrape import _patch_scrape_status
+        from ._artifacts import capture_debug_artifact
         started = time.time()
         state = ctx.state
         state.outcome = "failure"
         state.failure_reason = state.failure_reason or "login_wall"
+
+        # Debug-artifact invariant: before finalizing the Fail, snapshot
+        # what the blocked page looked like so the admin UI has something
+        # to render in the post-mortem. Best-effort.
+        page = getattr(state, "_browser_page", None)
+        artifact_info: dict = {}
+        try:
+            artifact_info = await capture_debug_artifact(
+                page, state, reason="obstacle_fail",
+            )
+        except Exception:
+            logger.warning(
+                "ObstacleFail: debug artifact capture failed scrape_id=%s",
+                state.scrape_id, exc_info=True,
+            )
 
         # Learning-loop closing touch: if this host had a graduated
         # obstacle_click_selector AND we still couldn't clear the wall,
@@ -276,7 +292,10 @@ class ObstacleFail(BaseNode[ScrapeGraphState, None, dict]):  # type: ignore[no-r
             )
 
         _patch_scrape_status(state.scrape_id, "failed", note=state.failure_reason)
-        trace_node(state, "ObstacleFail", "End", started)
+        trace_node(
+            state, "ObstacleFail", "End", started,
+            payload=artifact_info or None,
+        )
         return End({
             "outcome": "failure",
             "failure_reason": state.failure_reason,
