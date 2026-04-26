@@ -551,14 +551,63 @@ def _demote_graduated_selector(
 
 @dataclass
 class ResolveApplyUrl(BaseNode[ScrapeGraphState, None, dict]):  # type: ignore[no-redef]
-    """Phase 1b: no-op. Phase 2 PROJ lands the real resolver here."""
+    """Phase 2: resolve the apply destination (the URL behind the
+    posting's "Apply" button). Reads ``profile.apply_resolver_config``
+    and tries internal markers → link selectors → button selectors. The
+    result PATCHes ``/scrapes/{id}/apply-url/`` which writes through to
+    the JobPost. Always terminates the graph with End — apply
+    resolution is best-effort, never a hard failure.
+    """
 
     async def run(
         self, ctx: GraphRunContext[ScrapeGraphState, None]
     ) -> End[dict]:
         from .nodes_scrape import _patch_scrape_status
+        from .apply_resolver import resolve_apply_url
+
         started = time.time()
         state = ctx.state
+
+        page = getattr(state, "_browser_page", None)
+        config: dict | None = None
+        if state.profile and isinstance(state.profile, dict):
+            config = state.profile.get("apply_resolver_config")
+
+        try:
+            result = await resolve_apply_url(page, config)
+        except Exception:
+            logger.warning(
+                "ResolveApplyUrl resolver crashed scrape_id=%s",
+                state.scrape_id, exc_info=True,
+            )
+            result = {
+                "apply_url": None,
+                "apply_url_status": "failed",
+                "reason": "resolver_crashed",
+            }
+
+        if state.scrape_id:
+            try:
+                resp = httpx.patch(
+                    f"{_api_base()}/api/v1/scrapes/{state.scrape_id}/apply-url/",
+                    json={"data": {"attributes": {
+                        "apply_url": result.get("apply_url"),
+                        "apply_url_status": result.get("apply_url_status"),
+                    }}},
+                    headers={**_api_headers(), "Content-Type": "application/json"},
+                    timeout=10.0,
+                )
+                if resp.status_code >= 400:
+                    logger.warning(
+                        "ResolveApplyUrl PATCH failed status=%s body=%s",
+                        resp.status_code, resp.text[:300],
+                    )
+            except Exception:
+                logger.warning(
+                    "ResolveApplyUrl PATCH errored scrape_id=%s",
+                    state.scrape_id, exc_info=True,
+                )
+
         state.outcome = "success"
         note = (
             f"extracted job_post {state.job_post_id}"
@@ -566,11 +615,19 @@ class ResolveApplyUrl(BaseNode[ScrapeGraphState, None, dict]):  # type: ignore[n
             else f"extracted ({len(state.job_content or '')} chars)"
         )
         _patch_scrape_status(state.scrape_id, "completed", note=note)
-        trace_node(state, "ResolveApplyUrl", "End", started)
+        trace_node(
+            state, "ResolveApplyUrl", "End", started,
+            payload={
+                "apply_url_status": result.get("apply_url_status"),
+                "reason": result.get("reason"),
+            },
+        )
         return End({
             "outcome": "success",
             "job_post_id": state.job_post_id,
             "scrape_id": state.scrape_id,
+            "apply_url": result.get("apply_url"),
+            "apply_url_status": result.get("apply_url_status"),
         })
 
 
