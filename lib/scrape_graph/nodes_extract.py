@@ -563,7 +563,7 @@ class ResolveApplyUrl(BaseNode[ScrapeGraphState, None, dict]):  # type: ignore[n
         self, ctx: GraphRunContext[ScrapeGraphState, None]
     ) -> End[dict]:
         from .nodes_scrape import _patch_scrape_status
-        from .apply_resolver import resolve_apply_url
+        from .apply_resolver import resolve_apply_url, scan_apply_candidates
 
         started = time.time()
         state = ctx.state
@@ -586,14 +586,32 @@ class ResolveApplyUrl(BaseNode[ScrapeGraphState, None, dict]):  # type: ignore[n
                 "reason": "resolver_crashed",
             }
 
+        # Phase 3 learning loop: when the configured resolver missed,
+        # scan the page for "Apply"-shaped candidates and pass them
+        # along with the PATCH so they accumulate on the Scrape row.
+        # No-op when the resolver succeeded (resolved/internal) — those
+        # are confident outcomes that don't need refinement.
+        candidates: list[dict] = []
+        if result.get("apply_url_status") in ("unknown", "failed") and page is not None:
+            try:
+                candidates = await scan_apply_candidates(page)
+            except Exception:
+                logger.warning(
+                    "ResolveApplyUrl candidate scan crashed scrape_id=%s",
+                    state.scrape_id, exc_info=True,
+                )
+
         if state.scrape_id:
             try:
+                attrs: dict = {
+                    "apply_url": result.get("apply_url"),
+                    "apply_url_status": result.get("apply_url_status"),
+                }
+                if candidates:
+                    attrs["apply_candidates"] = candidates
                 resp = httpx.patch(
                     f"{_api_base()}/api/v1/scrapes/{state.scrape_id}/apply-url/",
-                    json={"data": {"attributes": {
-                        "apply_url": result.get("apply_url"),
-                        "apply_url_status": result.get("apply_url_status"),
-                    }}},
+                    json={"data": {"attributes": attrs}},
                     headers={**_api_headers(), "Content-Type": "application/json"},
                     timeout=10.0,
                 )

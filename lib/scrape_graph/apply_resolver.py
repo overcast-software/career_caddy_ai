@@ -124,6 +124,102 @@ async def _first_link_href(
     return None, None
 
 
+_CANDIDATE_SCAN_JS = r"""
+(() => {
+  const isApplyish = (s) => /\bapply\b/i.test(s || "");
+  const buildSelector = (el) => {
+    const tag = el.tagName.toLowerCase();
+    if (el.id && /^[A-Za-z][\w-]*$/.test(el.id)) {
+      return `#${el.id}`;
+    }
+    const classes = (el.className && typeof el.className === "string"
+      ? el.className.split(/\s+/) : [])
+      .filter((c) => c && /^[A-Za-z][\w-]*$/.test(c))
+      .slice(0, 3);
+    const dataAttrs = Array.from(el.attributes || [])
+      .filter((a) => a.name && a.name.startsWith("data-"))
+      .slice(0, 2)
+      .map((a) => `[${a.name}="${(a.value || "").slice(0, 32)}"]`)
+      .join("");
+    return tag + classes.map((c) => `.${c}`).join("") + dataAttrs;
+  };
+  const out = [];
+  for (const a of document.querySelectorAll("a[href]")) {
+    const href = a.href || a.getAttribute("href") || "";
+    const text = (a.innerText || "").trim().slice(0, 100);
+    const aria = a.getAttribute("aria-label") || "";
+    let score = 0;
+    const reasons = [];
+    if (isApplyish(href)) { score += 0.5; reasons.push("href contains 'apply'"); }
+    if (isApplyish(text)) { score += 0.4; reasons.push("text 'apply'"); }
+    if (isApplyish(aria)) { score += 0.3; reasons.push("aria-label 'apply'"); }
+    if (score === 0) continue;
+    out.push({
+      selector: buildSelector(a),
+      href: href.startsWith("http") ? href : null,
+      text: text,
+      tag: "a",
+      score: Math.min(score, 1),
+      reason: reasons.join(" AND "),
+    });
+  }
+  for (const b of document.querySelectorAll('button, [role="button"]')) {
+    const text = (b.innerText || "").trim().slice(0, 100);
+    const aria = b.getAttribute("aria-label") || "";
+    let score = 0;
+    const reasons = [];
+    if (isApplyish(text)) { score += 0.4; reasons.push("text 'apply'"); }
+    if (isApplyish(aria)) { score += 0.3; reasons.push("aria-label 'apply'"); }
+    if (score === 0) continue;
+    out.push({
+      selector: buildSelector(b),
+      href: null,
+      text: text,
+      tag: b.tagName.toLowerCase(),
+      score: Math.min(score, 1),
+      reason: reasons.join(" AND "),
+    });
+  }
+  return out;
+})()
+"""
+
+
+async def scan_apply_candidates(page: Any, max_candidates: int = 50) -> list[dict]:
+    """Heuristic scan for "Apply"-shaped elements, used when the configured
+    resolver missed (no config, or config didn't match anything on the page).
+
+    Phase 3 learning loop — captured candidates flow back to the api via
+    the apply-url PATCH and accumulate on the Scrape row for later
+    aggregation per host. Aggregation + promotion into
+    ``ScrapeProfile.apply_resolver_config`` is a separate slice; this
+    function is capture-only.
+
+    Returns a list of ``{"selector", "href", "text", "tag", "score",
+    "reason"}`` dicts, sorted by score descending, capped at
+    ``max_candidates`` (default 50). Empty list if the page is None or
+    the scan crashes — never raises.
+    """
+    if page is None:
+        return []
+    try:
+        results = await page.evaluate(_CANDIDATE_SCAN_JS)
+    except Exception:
+        logger.warning("scan_apply_candidates: page.evaluate crashed", exc_info=True)
+        return []
+    if not isinstance(results, list):
+        return []
+    cleaned = []
+    for r in results:
+        if not isinstance(r, dict):
+            continue
+        if not r.get("selector"):
+            continue
+        cleaned.append(r)
+    cleaned.sort(key=lambda r: float(r.get("score") or 0), reverse=True)
+    return cleaned[:max_candidates]
+
+
 async def _click_and_capture_url(page: Any, selector: str) -> Optional[str]:
     """Click ``selector`` and return the landing URL.
 
