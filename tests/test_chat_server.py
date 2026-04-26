@@ -51,3 +51,32 @@ class TestChatServerSecurity:
         mod = importlib.import_module("mcp_servers.chat_server")
         routes = [r.path for r in mod.app.routes]
         assert "/health" in routes
+
+
+class TestChatSystemPromptDuplicateRule:
+    """Regression: SYSTEM_PROMPT enforces find_job_post_by_link before any
+    create path, including when the URL is embedded in pasted text. See
+    todo.org "Chat: detect duplicate JobPost by link" [#A] :bug:.
+    """
+
+    def _prompt(self) -> str:
+        mod = importlib.import_module("mcp_servers.chat_server")
+        return mod.SYSTEM_PROMPT
+
+    def test_mentions_find_job_post_by_link(self):
+        assert "find_job_post_by_link" in self._prompt()
+
+    def test_explicitly_covers_pasted_text_with_url(self):
+        """The bug class is the agent skipping the dedup check when the URL
+        is buried inside a longer message. The prompt must say so verbatim
+        — vague instructions failed in prod."""
+        body = self._prompt().lower()
+        assert "pasted text" in body
+        assert "embedded" in body or "buried" in body or "inside" in body
+
+    def test_duplicate_hit_navigates_via_propose_actions(self):
+        """On a find_job_post_by_link hit, the agent must propose a navigate
+        action rather than create a duplicate or a redundant scrape."""
+        body = self._prompt()
+        assert "propose_actions" in body
+        assert "/job-posts/" in body
