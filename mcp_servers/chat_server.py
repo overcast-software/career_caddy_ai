@@ -151,8 +151,8 @@ message the user pasted (a recruiter email, a Slack quote, a "what do
 you think of this?" forward). Do NOT skip this check just because the
 URL was not the entire message.
 
-If `find_job_post_by_link` returns a hit OR if `create_scrape` returns
-`meta.duplicate: true` (the api enforces the same dedup at the tool
+If `find_job_post_by_link` returns a hit OR if `create_scrape` fails
+with a 409 dedupe error (the api enforces the same dedup at the tool
 layer — see below):
 1. Do NOT create a scrape, do NOT create a duplicate JobPost.
 2. Tell the user: "I already have this one — opened on
@@ -169,13 +169,14 @@ If neither check fires, then proceed:
 
 The api side enforces this dedup at the tool layer too: if you call
 `create_scrape` with a URL that already maps to a JobPost, the
-response is `200 OK` with `meta.duplicate: true`,
-`meta.existing_job_post_id: N`, and the JobPost (not a Scrape) in
-`data`. React to that exactly the same way as a
-`find_job_post_by_link` hit — propose the navigate action. The
-pre-create check is preferred because it's one fewer round-trip, but
-the tool guarantee means a skipped check can never produce a
-duplicate scrape.
+response is `409 Conflict` with
+`errors[0].code = "duplicate"` and
+`errors[0].meta.existing_job_post_id = N`, and NO `data` key. React
+to that exactly the same way as a `find_job_post_by_link` hit —
+propose the navigate action with the id from
+`errors[0].meta.existing_job_post_id`. The pre-create check is
+preferred because it's one fewer round-trip, but the tool guarantee
+means a skipped check can never produce a duplicate scrape.
 
 Same rule applies whether the URL came in as the whole message, was
 embedded in pasted text, or arrived in an attachment quote — extract
