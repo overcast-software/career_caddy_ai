@@ -133,10 +133,16 @@ async def _run_graph(
         source="poller",
     )
 
-    try:
+    # Hard cap on a single graph run. Without this, a node that hangs
+    # (e.g. an auth interstitial that doesn't fire `load`, an httpx
+    # call that ignores its own timeout) wedges the poller on one
+    # scrape forever — the row stays `running` and the queue stops
+    # advancing. 4 minutes is well above the worst observed happy-path
+    # run; anything beyond that is a stuck node, not slow work.
+    GRAPH_RUN_TIMEOUT_S = 240.0
+
+    async def _drive() -> None:
         if _RESIDENT is not None:
-            # Attended: reuse the domain's resident tab so manual
-            # login state persists across scrapes.
             async with _RESIDENT.lock_for(hostname):
                 page = await _RESIDENT.page_for(hostname, seed_cookies=cookies)
                 await run_scrape_graph(state, browser_page=page, has_browser=True)
@@ -156,6 +162,16 @@ async def _run_graph(
                         await ctx.close()
                     except Exception:
                         pass
+
+    try:
+        await asyncio.wait_for(_drive(), timeout=GRAPH_RUN_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        logger.warning("Scrape %s exceeded %.0fs graph cap", scrape_id, GRAPH_RUN_TIMEOUT_S)
+        await update_scrape(
+            api, scrape_id, status="failed",
+            note=f"graph run exceeded {int(GRAPH_RUN_TIMEOUT_S)}s cap",
+        )
+        return False
     except Exception as exc:
         logger.exception("Scrape %s failed inside graph run", scrape_id)
         await update_scrape(api, scrape_id, status="failed", note=str(exc)[:200])
