@@ -190,10 +190,32 @@ class TestAgentIntegration:
 
 class TestSecurityIsolation:
     def test_toolsets_does_not_import_browser(self):
-        """Loading lib.toolsets must not pull in any browser modules."""
+        """Loading lib.toolsets must not pull in any browser modules.
+
+        Run the check in a subprocess so sys.modules is pristine — an
+        in-process check is order-dependent (any prior test importing
+        mcp_servers.browser_server transitively loads lib.browser.* and
+        contaminates the sys.modules snapshot for this assertion).
+        """
+        import subprocess
         import sys
-        browser_modules = [m for m in sys.modules if "lib.browser" in m]
-        assert not browser_modules, f"Browser modules loaded: {browser_modules}"
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys; import lib.toolsets; "
+                    "leaked = [m for m in sys.modules if 'lib.browser' in m]; "
+                    "print('LEAKED:' + ','.join(leaked) if leaked else 'OK')"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "OK", result.stdout
 
     def test_api_tools_has_no_browser_imports(self):
         """api_tools.py import lines must not reference browser, credentials, or secrets."""
