@@ -148,8 +148,14 @@ class Navigate(BaseNode[ScrapeGraphState, None, dict]):  # type: ignore[no-redef
         if target_url != state.submitted_url:
             state.rewritten_url = target_url
         if page is not None:
+            # `domcontentloaded` lands as soon as the HTML is parsed —
+            # we don't need every tracker iframe to settle, and waiting
+            # on `load` can deadlock on auth interstitials (e.g.
+            # LinkedIn /comm/ → account-chooser) that hold sub-resources
+            # open. Downstream obstacle handling does its own waits on
+            # the actual elements it cares about.
             try:
-                await page.goto(target_url, wait_until="load", timeout=60_000)
+                await page.goto(target_url, wait_until="domcontentloaded", timeout=30_000)
                 state.final_url = page.url
             except Exception as exc:
                 state.failure_reason = f"navigate_failed: {exc}"
