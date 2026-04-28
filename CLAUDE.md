@@ -104,9 +104,19 @@ Agents (in `agents/`) use the `pydantic-ai` framework. They access tools through
 | Server | Transport | Port | Purpose |
 |--------|-----------|------|---------|
 | `career_caddy_server.py` | stdio | — | CRUD on Career Caddy REST API (jobs, companies, applications) |
-| `browser_server.py` | stdio or SSE | 3004 | Browser automation via `camoufox` |
+| `browser_server.py` | stdio or SSE | 3004 | Browser automation via `camoufox`. Optional / ad-hoc only — the production scrape path is the hold-poller, not this server. |
 | `public_server.py` | SSE | 8000 | Public MCP endpoint at `mcp.careercaddy.online` |
 | `chat_server.py` | SSE | 8000 | Frontend chat via SSE streaming |
+
+**Hold-poller is the only supported scrape driver.** The historical
+synchronous flow — api `Scraper.dispatch()` POSTing to a browser-MCP
+HTTP endpoint (`/scrape_job` on `localhost:3012`) — is gone. Every
+scrape created through `POST /api/v1/scrapes/` defaults to
+`status="hold"`; the hold-poller picks them up, drives extraction
+through the scrape-graph, and patches the row when done.
+`browser_server.py`'s `scrape_page` MCP tool stays for ad-hoc
+exploration (paste-form fallback, manual debugging) but no api code
+calls it anymore.
 
 ### Agent Responsibilities
 
