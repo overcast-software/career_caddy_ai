@@ -11,10 +11,11 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 from urllib.parse import urljoin
 
 import httpx
+import yaml
 from pydantic import BaseModel, Field
 
 
@@ -95,6 +96,278 @@ def _inject_frontend_urls(data: dict) -> dict:
     elif isinstance(data.get("data"), dict):
         _tag(data["data"])
     return data
+
+
+# ---------------------------------------------------------------------------
+# Slim-response helpers (PR #1: present but unwired)
+# ---------------------------------------------------------------------------
+#
+# The MCP layer used to return JSON:API verbatim, double-wrapped in
+# {"success", "data", "status_code"} and pretty-printed JSON. ~95% of a
+# typical response was relationship arrays the agent never reads.
+#
+# These helpers give each tool a small kit for shaping its own response:
+#
+#   _respond(payload)              → YAML serializer; no outer envelope.
+#   _relationships_to_counts(rec)  → array → int per relationship.
+#   _slim_record(rec, ...)         → keep only listed attrs / relationship mode.
+#
+# Per-tool shape decisions live in TOOL_SHAPES below, NOT in the agent.
+# Tools read their own row when composing the response.
+
+
+# Tool authors decide what each tool returns. Kept as a single dict so the
+# audit is one PR-reviewable diff. Agents never see this.
+TOOL_SHAPES: dict[str, dict[str, Any]] = {
+    # --- Read: single-resource ---
+    "get_current_user": {
+        "kind": "single",
+        "attrs": [
+            "username", "email", "first_name", "last_name",
+            "is_staff", "is_active", "is_guest", "auto_score",
+            "linkedin", "github", "address", "links", "onboarding",
+        ],
+        "relationships": "counts",
+        "notes": "Drop scores/job-applications id arrays; keep links blob.",
+    },
+    "find_company_by_name": {
+        "kind": "single",
+        "attrs": None,
+        "relationships": "counts",
+    },
+    "find_job_post_by_link": {
+        "kind": "single",
+        "attrs": None,
+        "relationships": "counts",
+        "notes": "Keep duplicate_of_id (it's an attr, not a relationship).",
+    },
+    "get_scrape_profile": {
+        "kind": "list_or_single",
+        "attrs": None,
+        "relationships": "counts",
+        "notes": "Config-shaped, naturally small. No attr trim.",
+    },
+    "get_scrape_graph_trace": {
+        "kind": "passthrough",
+        "notes": "Already slim. Just YAML-serialize and drop wrapper.",
+    },
+
+    # --- Read: list (table) ---
+    "get_companies": {
+        "kind": "list_or_single",
+        "list_attrs": ["name"],
+        "single_attrs": None,
+        "relationships": "counts",
+    },
+    "search_companies": {
+        "kind": "list",
+        "list_attrs": ["name"],
+        "relationships": "omit",
+    },
+    "get_job_posts": {
+        "kind": "list_or_single",
+        "list_attrs": [
+            "title", "posting_status", "created_at", "duplicate_of_id",
+            "company",
+        ],
+        "single_attrs": None,
+        "relationships": "counts",
+    },
+    "search_job_posts": {
+        "kind": "list",
+        "list_attrs": [
+            "title", "posting_status", "created_at", "duplicate_of_id",
+            "company",
+        ],
+        "relationships": "omit",
+    },
+    "get_job_applications": {
+        "kind": "list_or_single",
+        "list_attrs": ["status", "reason_code", "applied_at", "job_post_id"],
+        "single_attrs": None,
+        "relationships": "counts",
+    },
+    "get_applications_for_job_post": {
+        "kind": "list",
+        "list_attrs": ["status", "reason_code", "applied_at"],
+        "relationships": "omit",
+    },
+    "get_scrapes": {
+        "kind": "list_or_single",
+        "list_attrs": ["url", "status", "scraped_at"],
+        "single_attrs": None,
+        "relationships": "counts",
+    },
+    "get_scores": {
+        "kind": "list_or_single",
+        "list_attrs": ["score", "created_at", "job_post_id"],
+        "single_attrs": None,
+        "relationships": "counts",
+    },
+    "get_resumes": {
+        "kind": "list_or_single",
+        "list_attrs": ["name", "created_at"],
+        "single_attrs": None,
+        "relationships": "counts",
+    },
+    "get_questions": {
+        "kind": "list_or_single",
+        "list_attrs": ["text_excerpt", "job_post_id"],
+        "single_attrs": None,
+        "relationships": "counts",
+    },
+    "get_answers": {
+        "kind": "list_or_single",
+        "list_attrs": ["text_excerpt", "question_id"],
+        "single_attrs": None,
+        "relationships": "counts",
+    },
+    "list_scrape_screenshots": {
+        "kind": "passthrough",
+        "notes": "Already slim filename list. Just YAML + drop wrapper.",
+    },
+    "get_scrape_statuses": {
+        "kind": "passthrough",
+        "notes": "Already slim. Just YAML + drop wrapper.",
+    },
+
+    # --- Read: aggregate ---
+    "get_career_data": {
+        "kind": "aggregate",
+        "section_attrs": {
+            "resume": ["name", "created_at"],
+            "skill": ["name", "category", "level"],
+            "experience": ["company", "title", "started_at", "ended_at"],
+            "education": ["institution", "degree", "field", "ended_at"],
+            "certification": ["name", "issuer", "issued_at"],
+            "cover_letter": ["title", "created_at"],
+        },
+        "notes": "Trim every nested record; keep nesting structure.",
+    },
+
+    # --- Write: create ---
+    "create_company": {
+        "kind": "single",
+        "attrs": None,
+        "relationships": "counts",
+    },
+    "create_job_post_with_company_check": {
+        "kind": "single",
+        "attrs": None,
+        "relationships": "counts",
+    },
+    "create_job_application": {
+        "kind": "single",
+        "attrs": None,
+        "relationships": "counts",
+    },
+    "create_scrape": {
+        "kind": "single",
+        "attrs": None,
+        "relationships": "counts",
+    },
+
+    # --- Write: update ---
+    "update_job_post": {
+        "kind": "single",
+        "attrs": None,
+        "relationships": "counts",
+    },
+    "update_job_application": {
+        "kind": "single",
+        "attrs": None,
+        "relationships": "counts",
+    },
+    "update_scrape": {
+        "kind": "single",
+        "attrs": None,
+        "relationships": "counts",
+    },
+    "update_scrape_profile": {
+        "kind": "single",
+        "attrs": None,
+        "relationships": "counts",
+    },
+
+    # --- Action ---
+    "score_job_post": {
+        "kind": "passthrough",
+        "notes": "202 + pending status. Already small.",
+    },
+    "fetch_scrape_screenshot": {
+        "kind": "binary_meta",
+        "notes": "Don't dump the bytes. Return filename + size only.",
+    },
+}
+
+
+def _respond(payload: Any, *, error: Optional[str] = None,
+             status_code: Optional[int] = None) -> str:
+    """Serialize a tool response as YAML.
+
+    No outer {success, data, status_code} envelope; success is "no top-level
+    error key." Errors include the HTTP status only when non-2xx. Insertion
+    order is preserved (sort_keys=False) so the LLM sees identifying fields
+    first.
+    """
+    if error is not None:
+        out: dict[str, Any] = {"error": error}
+        if status_code is not None and status_code >= 400:
+            out["status_code"] = status_code
+        return yaml.safe_dump(out, sort_keys=False, default_flow_style=False)
+    return yaml.safe_dump(payload, sort_keys=False, default_flow_style=False)
+
+
+def _relationships_to_counts(record: dict) -> dict:
+    """Replace each `relationships.<rel>.data` array with its integer count.
+
+    Mutates and returns. Keeps relationship keys so the agent knows which
+    relationships exist; just strips the `[{type:..., id:...}, ...]` payload
+    that's never the cheapest way to fetch related records anyway.
+    """
+    rels = record.get("relationships")
+    if not isinstance(rels, dict):
+        return record
+    for name, blob in list(rels.items()):
+        if not isinstance(blob, dict):
+            continue
+        data = blob.get("data")
+        if isinstance(data, list):
+            rels[name] = len(data)
+        elif isinstance(data, dict):
+            # singular relationship (belongsTo) — replace with the id only,
+            # the agent can refetch via the typed get_* tool if it needs more.
+            rels[name] = data.get("id")
+        else:
+            rels[name] = None
+    return record
+
+
+def _slim_record(record: dict, *,
+                 attrs: Optional[list[str]] = None,
+                 relationships: str = "counts") -> dict:
+    """Trim a JSON:API resource record to its slim shape.
+
+    Args:
+        record: a JSON:API resource dict ({type, id, attributes, ...}).
+        attrs: if provided, keep only these attribute keys; None keeps all.
+        relationships: "counts" | "omit" | "inline"
+            counts → arrays become ints, belongsTo become ids.
+            omit   → drop the relationships key entirely.
+            inline → leave as-is (escape hatch; default for un-audited tools).
+
+    Mutates and returns the record so callers can chain.
+    """
+    if attrs is not None and isinstance(record.get("attributes"), dict):
+        record["attributes"] = {
+            k: v for k, v in record["attributes"].items() if k in attrs
+        }
+    if relationships == "omit":
+        record.pop("relationships", None)
+    elif relationships == "counts":
+        _relationships_to_counts(record)
+    # inline: no-op
+    return record
 
 
 class ApiClient:
